@@ -41,8 +41,8 @@
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
 #include "video_core/vulkan_common/vulkan_surface.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
-#ifdef EGLANTINE_STREAMLINE
-#include "video_core/vulkan_common/streamline.h"
+#ifdef EGLANTINE_NVIDIA_DLSS
+#include "video_core/vulkan_common/nvidia_dlss.h"
 #endif
 #ifdef __ANDROID__
 #include <jni.h>
@@ -133,8 +133,8 @@ try
     , gpu(gpu_)
     , library(OpenLibrary(context.get()))
     , dld()
-#ifdef EGLANTINE_STREAMLINE
-    , streamline_started(Streamline::Start())
+#ifdef EGLANTINE_NVIDIA_DLSS
+    , nvidia_dlss_started(NvidiaDlss::Start())
 #endif
     // Create raw Vulkan instance first
     , instance(CreateInstance(*library,
