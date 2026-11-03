@@ -18,8 +18,10 @@
 #include "video_core/renderer_vulkan/vk_compute_pass.h"
 #include "video_core/renderer_vulkan/vk_dlss_network_probe.h"
 #include "video_core/renderer_vulkan/vk_fsr3_upscaler.h"
-#ifdef EGLANTINE_STREAMLINE
+#if defined(EGLANTINE_STREAMLINE)
 #include "video_core/renderer_vulkan/vk_streamline_dlss.h"
+#elif defined(EGLANTINE_NGX)
+#include "video_core/renderer_vulkan/vk_ngx_dlss.h"
 #endif
 #include "video_core/renderer_vulkan/vk_render_pass_cache.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
@@ -38,6 +40,11 @@ using VideoCommon::ImageId;
 using VideoCommon::NUM_RT;
 using VideoCommon::Region2D;
 using VideoCore::Surface::PixelFormat;
+#if defined(EGLANTINE_STREAMLINE)
+using DlssUpscaler = StreamlineDlssUpscaler;
+#elif defined(EGLANTINE_NGX)
+using DlssUpscaler = NgxDlssUpscaler;
+#endif
 
 class BlitImageHelper;
 class DescriptorPool;
@@ -225,14 +232,14 @@ public:
     /// Draws an upscaler's RGBA16F output into the DLSS output and returns it to GENERAL.
     void DrawUpscaledOutput(Framebuffer* dst_framebuffer, VkImageView view, VkImage image,
                             VkSampler sampler);
-#ifdef EGLANTINE_STREAMLINE
-    /// NVIDIA's DLSS (through NVIDIA Streamline) in place of the game's,
+#ifdef EGLANTINE_NVIDIA_DLSS
+    /// NVIDIA's DLSS (through NVIDIA Streamline or NGX) in place of the game's,
     /// before FSR 3.1, when the setting is on. Returns false to fall back to FSR 3.1.
     bool UpscaleWithDlss(Framebuffer* dst_framebuffer, ImageView& input_color,
                          ImageView& motion_vectors, ImageView& depth,
                          std::array<u32, 2> render_size, std::array<f32, 2> jitter,
                          std::array<f32, 2> motion_scale, bool reset);
-    std::unique_ptr<StreamlineDlssUpscaler> dlss_upscaler;
+    std::unique_ptr<DlssUpscaler> dlss_upscaler;
     bool dlss_unsupported{};
 #endif
 

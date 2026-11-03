@@ -527,8 +527,40 @@ if (ENABLE_NVIDIA_DLSS)
     )
     target_include_directories(video_core PRIVATE "${STREAMLINE_INCLUDE_DIR}")
     target_link_libraries(video_core PRIVATE version wintrust crypt32)
-    target_compile_definitions(video_core PUBLIC EGLANTINE_STREAMLINE)
+    target_compile_definitions(video_core PUBLIC EGLANTINE_STREAMLINE EGLANTINE_NVIDIA_DLSS)
     message(STATUS "NVIDIA DLSS through Streamline: ${STREAMLINE_INCLUDE_DIR}")
+endif()
+
+# NVIDIA DLSS through NVIDIA NGX directly, on Linux, the same way. EGLANTINE_NGX_SDK is a checkout of
+# NVIDIA's DLSS SDK (github.com/NVIDIA/DLSS): its headers and its NGX loader (libnvsdk_ngx.a) are
+# built in; the NGX runtime comes with NVIDIA's driver and the DLSS library
+# (libnvidia-ngx-dlss.so.<version>) is loaded at run time from the user's ngx folder. Nothing of
+# NVIDIA's is in this repository.
+set(EGLANTINE_NGX_SDK "" CACHE PATH "NVIDIA DLSS SDK directory, for NVIDIA DLSS on Linux")
+if (EGLANTINE_NGX_SDK AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ENABLE_NVIDIA_DLSS)
+    if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+        set(NGX_LIB_DIR "${EGLANTINE_NGX_SDK}/lib/Linux_aarch64")
+    elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+        set(NGX_LIB_DIR "${EGLANTINE_NGX_SDK}/lib/Linux_x86_64")
+    else()
+        message(FATAL_ERROR "EGLANTINE_NGX_SDK: no NGX library for ${CMAKE_SYSTEM_PROCESSOR}")
+    endif()
+    if (NOT EXISTS "${EGLANTINE_NGX_SDK}/include/nvsdk_ngx_vk.h" OR
+        NOT EXISTS "${NGX_LIB_DIR}/libnvsdk_ngx.a")
+        message(FATAL_ERROR "EGLANTINE_NGX_SDK: ${EGLANTINE_NGX_SDK} is not NVIDIA's DLSS SDK")
+    endif()
+    target_sources(video_core PRIVATE
+        renderer_vulkan/vk_ngx_dlss.cpp
+        renderer_vulkan/vk_ngx_dlss.h
+        vulkan_common/ngx.cpp
+        vulkan_common/ngx.h
+    )
+    target_include_directories(video_core PRIVATE "${EGLANTINE_NGX_SDK}/include")
+    target_link_libraries(video_core PRIVATE "${NGX_LIB_DIR}/libnvsdk_ngx.a" ${CMAKE_DL_LIBS})
+    target_compile_definitions(video_core PUBLIC EGLANTINE_NGX EGLANTINE_NVIDIA_DLSS)
+    message(STATUS "NVIDIA DLSS through NGX: ${EGLANTINE_NGX_SDK}")
+elseif (EGLANTINE_NGX_SDK)
+    message(WARNING "EGLANTINE_NGX_SDK is only used on Linux without ENABLE_NVIDIA_DLSS; ignored")
 endif()
 
 create_target_directory_groups(video_core)
