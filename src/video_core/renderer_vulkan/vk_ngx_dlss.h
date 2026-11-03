@@ -13,6 +13,7 @@
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
 struct NVSDK_NGX_Handle;
+struct NVSDK_NGX_Parameter;
 
 namespace Vulkan {
 
@@ -74,6 +75,9 @@ private:
     /// The DLSS feature for the current sizes. Created, used and released on the scheduler's
     /// worker thread (and in the destructor once the GPU is idle).
     NVSDK_NGX_Handle* feature{};
+    /// This upscaler's own NGX parameters for creating and evaluating the feature (NGX's
+    /// capability parameters are for reading). Same thread rules as feature.
+    NVSDK_NGX_Parameter* params{};
     vk::Image output_image;
     vk::ImageView output_view;
     vk::Sampler point_sampler;

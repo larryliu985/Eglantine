@@ -32,7 +32,8 @@ int EnvInt(const char* name, int fallback) {
 }
 
 // DLSS validates the render size against the mode's range: pick the mode for this ratio. DLAA only
-// when nothing is scaled, which is what NVIDIA defines it as.
+// when nothing is scaled: NGX requires equal sizes for it, unlike Streamline, which picks DLAA from a
+// ratio of 0.99.
 NVSDK_NGX_PerfQuality_Value ModeFor(VkExtent2D render, VkExtent2D upscale) {
     if (render.width == upscale.width && render.height == upscale.height) {
         return NVSDK_NGX_PerfQuality_Value_DLAA;
@@ -95,7 +96,14 @@ NVSDK_NGX_Resource_VK Resource(const NgxDlssUpscaler::Image& image, VkExtent2D s
 NgxDlssUpscaler::NgxDlssUpscaler(const Device& device_, Scheduler& scheduler_,
                                  MemoryAllocator& memory_allocator_)
     : device{device_}, scheduler{scheduler_}, memory_allocator{memory_allocator_} {
-    if (!Ngx::IsDlssAvailable() || !Ngx::Capabilities()) {
+    if (!Ngx::IsDlssAvailable()) {
+        throw vk::Exception(VK_ERROR_FEATURE_NOT_PRESENT);
+    }
+    if (const NVSDK_NGX_Result result = NVSDK_NGX_VULKAN_AllocateParameters(&params);
+        NVSDK_NGX_FAILED(result) || !params) {
+        LOG_ERROR(Render_Vulkan, "NGX gave no parameters for DLSS (result {:#x})",
+                  static_cast<u32>(result));
+        params = nullptr;
         throw vk::Exception(VK_ERROR_FEATURE_NOT_PRESENT);
     }
     point_sampler = device.GetLogical().CreateSampler(VkSamplerCreateInfo{
@@ -124,10 +132,16 @@ NgxDlssUpscaler::~NgxDlssUpscaler() {
     // Not scheduler.Finish(): this runs when the renderer goes away, after the game's channels are
     // released, and a submit would touch their state. Nothing more gets recorded by then.
     void(device.GetLogical().WaitIdle());
-    if (feature && Ngx::IsDlssAvailable()) {
-        NVSDK_NGX_VULKAN_ReleaseFeature(feature);
+    if (Ngx::IsDlssAvailable()) {
+        if (feature) {
+            NVSDK_NGX_VULKAN_ReleaseFeature(feature);
+        }
+        if (params) {
+            NVSDK_NGX_VULKAN_DestroyParameters(params);
+        }
     }
     feature = nullptr;
+    params = nullptr;
 }
 
 void NgxDlssUpscaler::CreateOutput(VkExtent2D upscale_size) {
@@ -235,7 +249,6 @@ bool NgxDlssUpscaler::Upscale(const Inputs& in) {
     scheduler.Record([this, in, reset, size_changed, mode, preset, create_flags,
                       output_image_handle = *output_image,
                       output_view_handle = *output_view](vk::CommandBuffer cmdbuf) {
-        NVSDK_NGX_Parameter* const params = Ngx::Capabilities();
         // The caller draws the output this frame even when DLSS writes nothing to it: clear it
         // then, rather than show undefined contents (FSR 3.1 takes over from the next frame).
         const auto clear_output = [&] {

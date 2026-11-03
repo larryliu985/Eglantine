@@ -51,7 +51,10 @@ void LogFromNgx(const char* message, NVSDK_NGX_Logging_Level, NVSDK_NGX_Feature)
     while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) {
         text.remove_suffix(1);
     }
-    if (text.find("Error") != std::string_view::npos) {
+    // The callback's level is the configured one, not the line's: NGX writes "] Error: " and
+    // "] Warning: " into the line itself.
+    if (text.find("] Error: ") != std::string_view::npos ||
+        text.find("] Warning: ") != std::string_view::npos) {
         LOG_WARNING(Render_Vulkan, "NGX: {}", text);
     } else if (LogLevel() > 0) {
         LOG_INFO(Render_Vulkan, "NGX: {}", text);
