@@ -90,9 +90,9 @@ namespace {
 #ifdef EGLANTINE_NVIDIA_DLSS
     // What NVIDIA's DLSS asks for (through Streamline or NGX), where available. Static: the returned
     // pointers must outlive this call.
-    static std::vector<std::string> streamline;
-    streamline = NvidiaDlss::InstanceExtensions();
-    for (const std::string& name : streamline) {
+    static std::vector<std::string> nvidia_dlss;
+    nvidia_dlss = NvidiaDlss::InstanceExtensions();
+    for (const std::string& name : nvidia_dlss) {
         const bool available = std::ranges::any_of(properties, [&](const VkExtensionProperties& p) {
             return name == p.extensionName;
         });
