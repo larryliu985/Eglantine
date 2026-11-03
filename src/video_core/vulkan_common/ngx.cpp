@@ -69,7 +69,12 @@ std::vector<std::filesystem::path> SearchDirs() {
         dirs.emplace_back(dir);
     }
     dirs.push_back(UserFolder());
-    dirs.push_back(Common::FS::GetExeDirectory() / "ngx");
+    // Common::FS::GetExeDirectory is Windows-only.
+    std::error_code ec;
+    if (const std::filesystem::path exe = std::filesystem::read_symlink("/proc/self/exe", ec);
+        !ec) {
+        dirs.push_back(exe.parent_path() / "ngx");
+    }
     return dirs;
 }
 
