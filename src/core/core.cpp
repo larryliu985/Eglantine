@@ -551,6 +551,9 @@ struct System::Impl {
         stop_event.request_stop();
         core_timing.SyncPause(false);
         Network::CancelPendingSocketOperations();
+        // Stop the cheat engine before the services go: its timing event reads HID through the
+        // service manager, and the timer thread keeps running during shutdown.
+        cheat_engine.reset();
         kernel.SuspendEmulation(true);
         kernel.CloseServices();
         // Each step done tells the frontend the teardown still moves (see
@@ -561,7 +564,6 @@ struct System::Impl {
         services.reset();
         service_manager.reset();
         fs_controller.Reset();
-        cheat_engine.reset();
         core_timing.ClearPendingEvents();
         app_loader.reset();
         Common::NoteShutdownProgress();
