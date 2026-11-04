@@ -1552,12 +1552,12 @@ bool TextureCacheRuntime::WantsTemporalUpscaleDepth() const {
 }
 
 bool TextureCacheRuntime::UsesNvidiaDlss() const {
-#ifdef EGLANTINE_STREAMLINE
+#ifdef EGLANTINE_NVIDIA_DLSS
     static const bool force_fsr = [] {
         const char* const value = std::getenv("EDEN_NX2_DLSS_REPLACEMENT");
         return value && std::string_view{value} == "fsr";
     }();
-    return !force_fsr && !dlss_unsupported && Streamline::IsDlssAvailable();
+    return !force_fsr && !dlss_unsupported && NvidiaDlss::IsDlssAvailable();
 #else
     return false;
 #endif
