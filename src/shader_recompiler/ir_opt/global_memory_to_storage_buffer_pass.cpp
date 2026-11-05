@@ -79,6 +79,14 @@ struct StorageInfo {
     std::unordered_set<const IR::Inst*> native_dynamic;
     /// A native access with several candidate pointers was left global.
     bool native_runtime_bounds{};
+    /// Pointer table entries reached through a phi or select of table pointers, or through a
+    /// table pointer read from a dynamically indexed constant buffer array. They are bound only
+    /// in the bindings the program's other storage buffers leave free (table_budget).
+    bool tables_enabled{};
+    bool tables_seen{};
+    size_t table_budget{};
+    size_t table_used{};
+    small_vector<StorageBufferAddr, 8> table_candidates;
 };
 
 /// Returns true when the instruction is a global memory instruction
@@ -1085,7 +1093,8 @@ void CollectPointerSlots(const IR::Value& offset, small_vector<std::pair<u32, u3
 /// can point into a different buffer, so the search does not stop at the first pointer. A pointer
 /// read from an array at a dynamic offset contributes every mapped slot of the array.
 small_vector<StorageBufferAddr, 4> NativePointerCandidates(const IR::U32& low_addr,
-                                                           Environment& env, bool& dynamic) {
+                                                           Environment& env, bool& dynamic,
+                                                           StorageInfo& info) {
     small_vector<StorageBufferAddr, 4> candidates;
     small_vector<const IR::Inst*, 16> pending{low_addr.InstRecursive()};
     std::unordered_set<const IR::Inst*> visited{pending.front()};
@@ -1141,40 +1150,133 @@ small_vector<StorageBufferAddr, 4> NativePointerCandidates(const IR::U32& low_ad
             enqueue(inst->Arg(1));
             enqueue(inst->Arg(2));
             break;
+        case IR::Opcode::ShuffleIndex:
+            // A pointer made uniform (R2UR broadcasts the first active lane's value).
+            enqueue(inst->Arg(0));
+            break;
         case IR::Opcode::CompositeExtractU32x2:
             if (inst->Arg(1).IsImmediate() && inst->Arg(1).U32() == 0) {
                 enqueue(inst->Arg(0));
             }
             break;
         case IR::Opcode::LoadGlobal64: {
-            // A pointer loaded from the memory a constant buffer pointer points to (compute only,
-            // the binding reads it again for every dispatch).
-            if (env.ShaderStage() != Stage::Compute) {
-                break;
-            }
+            // A pointer loaded from the memory a constant buffer pointer points to (the binding
+            // reads it again for every dispatch and draw).
+            // The table address: a tracked low word, or a constant buffer pointer packed whole.
+            const IR::Inst* holder_root{};
+            s32 holder_offset{};
             const auto holder_addr{TrackLowAddress(const_cast<IR::Inst*>(inst))};
-            if (!holder_addr || holder_addr->imm_offset < 0 || holder_addr->value.IsImmediate()) {
+            if (holder_addr) {
+                if (holder_addr->value.IsImmediate()) {
+                    break;
+                }
+                holder_root = holder_addr->value.InstRecursive();
+                holder_offset = holder_addr->imm_offset;
+            } else {
+                IR::Value address{inst->Arg(0)};
+                if (!address.IsImmediate() &&
+                    address.InstRecursive()->GetOpcode() == IR::Opcode::IAdd64 &&
+                    address.InstRecursive()->Arg(1).IsImmediate()) {
+                    holder_offset =
+                        static_cast<s32>(static_cast<s64>(address.InstRecursive()->Arg(1).U64()));
+                    address = address.InstRecursive()->Arg(0);
+                }
+                if (address.IsImmediate() ||
+                    address.InstRecursive()->GetOpcode() != IR::Opcode::PackUint2x32 ||
+                    address.InstRecursive()->Arg(0).IsImmediate()) {
+                    break;
+                }
+                holder_root = address.InstRecursive()->Arg(0).InstRecursive();
+            }
+            if (holder_offset < 0 || !Common::IsAligned(holder_offset, 8)) {
                 break;
             }
-            const IR::Inst* holder{holder_addr->value.InstRecursive()};
-            if (holder->GetOpcode() == IR::Opcode::CompositeExtractU32x2 &&
-                holder->Arg(1).IsImmediate() && holder->Arg(1).U32() == 0 &&
-                !holder->Arg(0).IsImmediate()) {
-                holder = holder->Arg(0).InstRecursive();
-            }
-            if ((holder->GetOpcode() != IR::Opcode::GetCbufU32 &&
-                 holder->GetOpcode() != IR::Opcode::GetCbufU32x2) ||
-                !holder->Arg(0).IsImmediate() || !holder->Arg(1).IsImmediate()) {
-                break;
-            }
-            const StorageBufferAddr pointer{.index = holder->Arg(0).U32(),
-                                            .offset = holder->Arg(1).U32(),
-                                            .indirect = static_cast<u32>(holder_addr->imm_offset)};
-            if (Common::IsAligned(pointer.offset, 8) && Common::IsAligned(pointer.indirect, 8) &&
-                std::ranges::find(candidates, pointer) == candidates.end() &&
-                env.IsCbufStorageBufferPointer(pointer.index, pointer.offset)) {
+            const u32 indirect{static_cast<u32>(holder_offset)};
+            // The table pointer can also be one of several constant buffer pointers (a phi or
+            // select of them), or an entry of a constant buffer array indexed at run time (one
+            // table per object type: every slot whose table entry is a pointer). Those are table
+            // candidates, bound only in the bindings the other storage buffers leave free.
+            const auto add = [&](const StorageBufferAddr& pointer, bool table) {
+                if (std::ranges::find(candidates, pointer) != candidates.end()) {
+                    return;
+                }
+                if (table && env.ShaderStage() != Stage::Compute) {
+                    // Graphics programs bind every candidate for every draw: table entries
+                    // multiply the storage buffers of draws that never read them.
+                    return;
+                }
+                if (table) {
+                    info.tables_seen = true;
+                    if (!info.tables_enabled) {
+                        return;
+                    }
+                    if (std::ranges::find(info.table_candidates, pointer) ==
+                        info.table_candidates.end()) {
+                        info.table_candidates.push_back(pointer);
+                    }
+                }
                 candidates.push_back(pointer);
                 dynamic = true;
+            };
+            small_vector<std::pair<const IR::Inst*, bool>, 4> holders{{holder_root, false}};
+            std::unordered_set<const IR::Inst*> holder_visited{holder_root};
+            for (size_t pending_holder = 0; pending_holder < holders.size(); ++pending_holder) {
+                const auto [holder, via_phi] = holders[pending_holder];
+                const auto enqueue_holder = [&](const IR::Value& value, bool branch) {
+                    if (!value.IsImmediate() && holders.size() < 8 &&
+                        holder_visited.insert(value.InstRecursive()).second) {
+                        holders.emplace_back(value.InstRecursive(), via_phi || branch);
+                    }
+                };
+                switch (holder->GetOpcode()) {
+                case IR::Opcode::CompositeExtractU32x2:
+                    if (holder->Arg(1).IsImmediate() && holder->Arg(1).U32() == 0) {
+                        enqueue_holder(holder->Arg(0), false);
+                    }
+                    continue;
+                case IR::Opcode::Phi:
+                    for (size_t arg = 0; arg < holder->NumArgs(); ++arg) {
+                        enqueue_holder(holder->Arg(arg), true);
+                    }
+                    continue;
+                case IR::Opcode::SelectU32:
+                    enqueue_holder(holder->Arg(1), true);
+                    enqueue_holder(holder->Arg(2), true);
+                    continue;
+                case IR::Opcode::GetCbufU32:
+                case IR::Opcode::GetCbufU32x2:
+                    break;
+                default:
+                    continue;
+                }
+                if (!holder->Arg(0).IsImmediate()) {
+                    continue;
+                }
+                const u32 index{holder->Arg(0).U32()};
+                if (holder->Arg(1).IsImmediate()) {
+                    const StorageBufferAddr pointer{
+                        .index = index, .offset = holder->Arg(1).U32(), .indirect = indirect};
+                    if (Common::IsAligned(pointer.offset, 8) &&
+                        env.IsCbufStorageBufferPointer(pointer.index, pointer.offset)) {
+                        add(pointer, via_phi || !holder_addr);
+                    }
+                    continue;
+                }
+                static constexpr u32 max_slots{16};
+                small_vector<std::pair<u32, u32>, 4> slots;
+                std::unordered_set<const IR::Inst*> slot_visited;
+                CollectPointerSlots(holder->Arg(1), slots, slot_visited);
+                for (const auto& [first, stride] : slots) {
+                    for (u32 slot = 0; slot < (stride ? max_slots : 1U); ++slot) {
+                        const StorageBufferAddr pointer{
+                            .index = index, .offset = first + slot * stride, .indirect = indirect};
+                        if (Common::IsAligned(pointer.offset, 8) &&
+                            env.IsCbufIndirectStorageBufferPointer(pointer.index, pointer.offset,
+                                                                   pointer.indirect)) {
+                            add(pointer, true);
+                        }
+                    }
+                }
             }
             break;
         }
@@ -1217,7 +1319,8 @@ void CollectStorageBuffers(IR::Block& block, IR::Inst& inst, StorageInfo& info, 
         auto it{info.native_candidates.find(start)};
         if (it == info.native_candidates.end()) {
             bool dynamic{};
-            it = info.native_candidates.emplace(start, NativePointerCandidates(low_addr, env, dynamic))
+            it = info.native_candidates
+                     .emplace(start, NativePointerCandidates(low_addr, env, dynamic, info))
                      .first;
             if (dynamic) {
                 info.native_dynamic.insert(start);
@@ -1227,7 +1330,22 @@ void CollectStorageBuffers(IR::Block& block, IR::Inst& inst, StorageInfo& info, 
         if (candidates.size() > 1 || (!candidates.empty() && info.native_dynamic.contains(start))) {
             // Bind every candidate and keep the access global; the backend picks the buffer at
             // run time. Rebasing on one of them drops the other path's accesses.
+            bool accepted{};
             for (const StorageBufferAddr& candidate : candidates) {
+                if (std::ranges::find(info.table_candidates, candidate) !=
+                    info.table_candidates.end()) {
+                    const StorageBufferAddr holder{.index = candidate.index,
+                                                   .offset = candidate.offset};
+                    const size_t added{
+                        (info.set.find(candidate) == info.set.end() ? 1U : 0U) +
+                        (candidate.indirect != ~0U && info.set.find(holder) == info.set.end()
+                             ? 1U
+                             : 0U)};
+                    if (info.table_used + added > info.table_budget) {
+                        continue;
+                    }
+                    info.table_used += added;
+                }
                 info.set.insert(candidate);
                 if (IsGlobalMemoryWrite(inst)) {
                     info.writes.insert(candidate);
@@ -1237,11 +1355,14 @@ void CollectStorageBuffers(IR::Block& block, IR::Inst& inst, StorageInfo& info, 
                     info.set.insert(StorageBufferAddr{.index = candidate.index,
                                                       .offset = candidate.offset});
                 }
+                accepted = true;
             }
-            info.native_runtime_bounds = true;
-            return;
-        }
-        if (candidates.size() == 1) {
+            if (accepted) {
+                info.native_runtime_bounds = true;
+                return;
+            }
+            // Only table entries, and no free binding for them: as if none had been found.
+        } else if (candidates.size() == 1) {
             // The one pointer the address is built from. The NVN search below only takes 16-byte
             // aligned slots, so for a pointer at an 8-byte slot it can return a dimension or stride
             // the address arithmetic reads instead, and the access then lands in the wrong buffer.
@@ -1428,14 +1549,27 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
     StorageInfo info;
     info.iterator_words = CollectIteratorWords(program);
     info.atomic_pointers = CollectAtomicPointers(program);
-    for (IR::Block* const block : program.post_order_blocks) {
-        for (IR::Inst& inst : block->Instructions()) {
-            if (!IsGlobalMemory(inst)) {
-                continue;
+    const auto collect = [&] {
+        for (IR::Block* const block : program.post_order_blocks) {
+            for (IR::Inst& inst : block->Instructions()) {
+                if (!IsGlobalMemory(inst)) {
+                    continue;
+                }
+                conditions.current = block;
+                CollectStorageBuffers(*block, inst, info, env, conditions);
             }
-            conditions.current = block;
-            CollectStorageBuffers(*block, inst, info, env, conditions);
         }
+    };
+    collect();
+    if (info.tables_seen && info.set.size() < Info::MAX_SSBOS) {
+        // Again with pointer table entries, in the bindings the first pass left free.
+        StorageInfo with_tables;
+        with_tables.iterator_words = std::move(info.iterator_words);
+        with_tables.atomic_pointers = std::move(info.atomic_pointers);
+        with_tables.tables_enabled = true;
+        with_tables.table_budget = Info::MAX_SSBOS - info.set.size();
+        info = std::move(with_tables);
+        collect();
     }
     program.info.native_global_bounds |= info.native_runtime_bounds;
     for (const StorageBufferAddr& storage_buffer : info.set) {
