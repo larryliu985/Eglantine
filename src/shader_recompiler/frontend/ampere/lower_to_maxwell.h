@@ -237,8 +237,9 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
         RegisterPressure pressure{insn};
         bool requires_shadow = false;
         for (u32 bit : {16U, 24U, 32U, 64U}) {
+            // 0x927 ISBEWR: the stored data register (zortos293/Lichii#100, Ocarina door NaN).
             if (bit == 32 && insn.Bits(9, 3) != 1 && opcode != 0xb60 && opcode != 0xb66 && opcode != 0xf66 &&
-                opcode != 0x988) continue;
+                opcode != 0x988 && opcode != 0x927) continue;
             const u32 reg = insn.Bits(bit, 8);
             if (reg >= shadow_boundary && reg < 255) requires_shadow = true;
         }
