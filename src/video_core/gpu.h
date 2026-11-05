@@ -7,6 +7,7 @@
 #pragma once
 
 #include <functional>
+#include <mutex>
 #include <memory>
 
 #include "common/bit_field.h"
@@ -271,7 +272,16 @@ public:
     /// Notify rasterizer that any caches of the specified region should be flushed and invalidated
     void FlushAndInvalidateRegion(DAddr addr, u64 size);
 
+    /// Orders Switch 2 GPU memory map updates (recorded for submit-time copies, then queued for
+    /// the GPU thread) with command list submissions (copied, then queued): neither interleaves
+    /// with the other, so the copies see exactly the updates queued before them, and updates
+    /// retire in the order they were recorded. Never taken on the GPU thread.
+    [[nodiscard]] std::mutex& SubmitOrderMutex() {
+        return submit_order_mutex;
+    }
+
 private:
+    std::mutex submit_order_mutex;
     struct Impl;
     mutable std::unique_ptr<Impl> impl;
 };

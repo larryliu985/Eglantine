@@ -413,6 +413,8 @@ NvResult nvhost_gpu::SubmitGPFIFOImpl(IoctlSubmitGpfifo& params, Tegra::CommandL
     auto& gpu = system.GPU();
 
     std::scoped_lock lock(channel_mutex);
+    // The copies below and the queueing of the lists, against GPU map updates (nvhost_as_gpu).
+    std::scoped_lock order(gpu.SubmitOrderMutex());
 
     // Lazily initialize channel when address space is available
     if (!channel_state->initialized && channel_state->memory_manager) {
@@ -458,8 +460,21 @@ NvResult nvhost_gpu::SubmitGPFIFOImpl(IoctlSubmitGpfifo& params, Tegra::CommandL
             size_t offset = 0;
             for (const auto& entry : entries.command_lists) {
                 entries.submitted_offsets.push_back(static_cast<u32>(offset));
-                channel_state->memory_manager->ReadBlockUnsafe(
+                // Through the maps queued for the GPU thread: right after creating a queue,
+                // games map its command memory and submit at once, and with the page tables
+                // still unmapped the copy read zeros. The lists ran as no-ops, the queue's
+                // semaphore release never came and the game waited on it forever (Zelda:
+                // Ocarina of Time and Splatoon Raiders stopped at Launching every few boots).
+                const std::size_t queued_bytes = channel_state->memory_manager->ReadBlockAsQueued(
                     entry.addr, entries.submitted_words.data() + offset, entry.size * sizeof(u32));
+                if (queued_bytes != 0) {
+                    static std::atomic<u64> through_queued{};
+                    const u64 count = through_queued.fetch_add(1, std::memory_order_relaxed) + 1;
+                    if ((count & (count - 1)) == 0) {
+                        LOG_INFO(Service_NVDRV, "nx2 command lists copied through queued GPU maps: {}",
+                                 count);
+                    }
+                }
                 offset += entry.size;
             }
         }

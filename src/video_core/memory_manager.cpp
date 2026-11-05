@@ -467,6 +467,65 @@ void MemoryManager::ReadBlockUnsafe(GPUVAddr gpu_src_addr, void* dest_buffer, co
     ReadBlockImpl(gpu_src_addr, dest_buffer, size, VideoCommon::CacheType::None, true);
 }
 
+void MemoryManager::QueueMapUpdate(GPUVAddr gpu_addr, std::size_t size,
+                                   std::optional<DAddr> dev_addr) {
+    std::scoped_lock lock{queued_map_guard};
+    queued_map_updates.push_back({gpu_addr, size, dev_addr});
+    has_queued_map_updates.store(true, std::memory_order_release);
+}
+
+void MemoryManager::RetireMapUpdate() {
+    std::scoped_lock lock{queued_map_guard};
+    if (!queued_map_updates.empty()) {
+        queued_map_updates.pop_front();
+    }
+    has_queued_map_updates.store(!queued_map_updates.empty(), std::memory_order_release);
+}
+
+std::size_t MemoryManager::ReadBlockAsQueued(GPUVAddr gpu_src_addr, void* dest_buffer,
+                                             std::size_t size) const {
+    // The caller holds GPU::SubmitOrderMutex: no update is recorded meanwhile, only retired.
+    if (!has_queued_map_updates.load(std::memory_order_acquire)) {
+        ReadBlockUnsafe(gpu_src_addr, dest_buffer, size);
+        return 0;
+    }
+    // Held across the reads: an update retires only after the page tables have it, so every
+    // piece reads either through a queued update or through tables that already hold it.
+    std::scoped_lock lock{queued_map_guard};
+    u8* out = static_cast<u8*>(dest_buffer);
+    std::size_t through_queued = 0;
+    GPUVAddr current = gpu_src_addr;
+    const GPUVAddr end = gpu_src_addr + size;
+    while (current < end) {
+        // Up to the next boundary of any queued update, the newest one covering it decides.
+        GPUVAddr next = end;
+        const QueuedMapUpdate* newest = nullptr;
+        for (auto it = queued_map_updates.rbegin(); it != queued_map_updates.rend(); ++it) {
+            const GPUVAddr update_end = it->gpu_addr + it->size;
+            if (it->gpu_addr > current) {
+                next = (std::min)(next, it->gpu_addr);
+            } else if (current < update_end) {
+                next = (std::min)(next, update_end);
+                if (newest == nullptr) {
+                    newest = &*it;
+                }
+            }
+        }
+        const std::size_t length = static_cast<std::size_t>(next - current);
+        if (newest == nullptr) {
+            ReadBlockUnsafe(current, out, length);
+        } else if (newest->dev_addr) {
+            memory.ReadBlockUnsafe(*newest->dev_addr + (current - newest->gpu_addr), out, length);
+            through_queued += length;
+        } else {
+            std::memset(out, 0, length);
+        }
+        out += length;
+        current = next;
+    }
+    return through_queued;
+}
+
 void MemoryManager::ReadWordsUnsafe(GPUVAddr gpu_src_addr, u32* dest, std::size_t count) const {
     const std::size_t size = count * sizeof(u32);
     const auto shim = native_syncpoint_shim.load(std::memory_order_acquire);
