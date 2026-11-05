@@ -5,13 +5,38 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <cstring>
+#include <set>
+#include <tuple>
 
 #include "common/settings.h"
 #include "video_core/dirty_flags.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/rasterizer_interface.h"
+#include "video_core/render_trace.h"
 
 namespace Tegra::Engines {
+namespace {
+
+void TraceSuppressedDraw(const Maxwell3D& maxwell3d, bool indirect) {
+    if (!VideoCommon::RenderTrace::Enabled()) {
+        return;
+    }
+    const auto& regs = maxwell3d.regs;
+    const u64 vs = (u64{regs.pipelines[1].reserved[0] & 0xff} << 32) | regs.pipelines[1].reserved[1];
+    const u64 ps = (u64{regs.pipelines[5].reserved[0] & 0xff} << 32) | regs.pipelines[5].reserved[1];
+    static thread_local std::set<std::tuple<u64, u64, u64, bool, bool>> seen;
+    if (seen.size() < 256 &&
+        seen.emplace(vs, ps, regs.render_enable.Address(), Settings::IsDockedMode(), indirect).second) {
+        LOG_DEBUG(HW_GPU,
+                  "Render trace suppressed: docked={} indirect={} vs={:#x} ps={:#x} "
+                  "condition_address={:#x} mode={} override={}",
+                  Settings::IsDockedMode(), indirect, vs, ps, regs.render_enable.Address(),
+                  static_cast<u32>(regs.render_enable.mode),
+                  static_cast<u32>(regs.render_enable_override));
+    }
+}
+
+} // namespace
 
 void Maxwell3D::DrawManager::ProcessMethodCall(Maxwell3D& maxwell3d, u32 method, u32 argument) {
     switch (method) {
@@ -319,6 +344,8 @@ void Maxwell3D::DrawManager::ProcessDraw(Maxwell3D& maxwell3d, bool draw_indexed
     UpdateTopology(maxwell3d);
     if (maxwell3d.ShouldExecute()) {
         maxwell3d.rasterizer->Draw(draw_indexed, instance_count);
+    } else {
+        TraceSuppressedDraw(maxwell3d, false);
     }
 }
 
@@ -328,6 +355,8 @@ void Maxwell3D::DrawManager::ProcessDrawIndirect(Maxwell3D& maxwell3d) {
     UpdateTopology(maxwell3d);
     if (maxwell3d.ShouldExecute()) {
         maxwell3d.rasterizer->DrawIndirect();
+    } else {
+        TraceSuppressedDraw(maxwell3d, true);
     }
 }
 } // namespace Tegra::Engines

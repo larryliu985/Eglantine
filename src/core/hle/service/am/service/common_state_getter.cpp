@@ -199,8 +199,9 @@ Result ICommonStateGetter::GetOperationMode(Out<OperationMode> out_operation_mod
 }
 
 Result ICommonStateGetter::GetPerformanceMode(Out<APM::PerformanceMode> out_performance_mode) {
-    LOG_DEBUG(Service_AM, "called");
     *out_performance_mode = system.GetAPMController().GetCurrentPerformanceMode();
+    LOG_DEBUG(Service_AM, "called, docked={} performance_mode={}", Settings::IsDockedMode(),
+              static_cast<u32>(*out_performance_mode));
     R_SUCCEED();
 }
 
@@ -253,8 +254,6 @@ Result ICommonStateGetter::IsInControllerFirmwareUpdateSection(
 }
 
 Result ICommonStateGetter::GetDefaultDisplayResolution(Out<s32> out_width, Out<s32> out_height) {
-    LOG_DEBUG(Service_AM, "called");
-
     if (Settings::IsDockedMode()) {
         *out_width = static_cast<u32>(Service::VI::DisplayResolution::DockedWidth);
         *out_height = static_cast<u32>(Service::VI::DisplayResolution::DockedHeight);
@@ -262,6 +261,9 @@ Result ICommonStateGetter::GetDefaultDisplayResolution(Out<s32> out_width, Out<s
         *out_width = static_cast<u32>(Service::VI::DisplayResolution::UndockedWidth);
         *out_height = static_cast<u32>(Service::VI::DisplayResolution::UndockedHeight);
     }
+
+    LOG_DEBUG(Service_AM, "called, docked={} resolution={}x{}", Settings::IsDockedMode(),
+              *out_width, *out_height);
 
     R_SUCCEED();
 }

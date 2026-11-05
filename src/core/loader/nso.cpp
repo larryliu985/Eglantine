@@ -19,6 +19,7 @@
 #include "common/settings.h"
 #include "common/swap.h"
 #include "core/core.h"
+#include "core/arm/dynarmic/window_trace.h"
 #include "core/file_sys/patch_manager.h"
 #include "core/hle/kernel/code_set.h"
 #include "core/hle/kernel/k_page_table.h"
@@ -313,6 +314,18 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
     }
 
     // Load codeset for current process
+    if (name == "sdk") {
+        const bool matching_sdk =
+            Core::WindowTrace::Enabled() && process.GetProgramId() == Core::WindowTrace::ProgramId &&
+            Common::HexToString(std::span{nso_header.build_id}.first(20)) ==
+                "41D4DE4A3B78214AD20C896960DF0E5EA0ED595F";
+        Core::WindowTrace::sessions.Reset(&process, matching_sdk ? load_base : 0);
+        if (Core::WindowTrace::Enabled()) {
+            const auto session = Core::WindowTrace::sessions.Find(&process);
+            LOG_INFO(Loader, "Star Fox window trace: matching SDK={} base={:#x} session={}",
+                     matching_sdk, matching_sdk ? load_base : 0, session ? session->id : 0);
+        }
+    }
     LOG_INFO(Loader, "Module {} loaded at {:#x} (size {:#x})", nso_file.GetName(), load_base, image_size);
     process.LoadModule(system.Kernel(), std::move(codeset), load_base);
     if (name == "main" && process.GetProgramId() == Settings::MarioKartWorldProgramId) {

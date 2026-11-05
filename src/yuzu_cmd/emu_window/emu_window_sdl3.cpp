@@ -42,6 +42,11 @@ EmuWindow_SDL3::EmuWindow_SDL3(InputCommon::InputSubsystem* input_subsystem_, Co
         // Timers run on their own thread and AppKit throws when a title is set off the main
         // thread: ApplyPendingTitle sets it from the main loop.
         delete this_->pending_title.exchange(title);
+        static const bool log_fps = std::getenv("EDEN_NX2_FPS_LOG") != nullptr;
+        if (log_fps) {
+            LOG_INFO(Frontend, "FPS: {:.1f} speed: {:.0f}% frametime: {:.2f} ms", results.average_game_fps,
+                     results.emulation_speed * 100.0, results.frametime * 1000.0);
+        }
         return 2000;
     }, this);
     mouse_timer = SDL_AddTimer(100, [](void *userdata, SDL_TimerID, Uint32) -> Uint32 {

@@ -28,7 +28,7 @@ UpdateDialog::UpdateDialog(const Common::Net::Release& release, QWidget* parent)
     ui->version->setText(
         tr("%1 is available for download.").arg(QString::fromStdString(release.title)));
     ui->url->setText(
-        tr("<a href=\"%1\">View on Forgejo</a>").arg(QString::fromStdString(release.html_url)));
+        tr("<a href=\"%1\">View on GitHub</a>").arg(QString::fromStdString(release.html_url)));
 
     std::string text{release.body};
     if (auto pos = text.find("# Packages"); pos != std::string::npos) {
@@ -99,6 +99,7 @@ void UpdateDialog::Download() {
     client->set_connection_timeout(timeout_seconds);
     client->set_read_timeout(timeout_seconds);
     client->set_write_timeout(timeout_seconds);
+    client->set_follow_location(true);
 
 #ifdef YUZU_BUNDLED_OPENSSL
     client->load_ca_cert_store(kCert, sizeof(kCert));
@@ -118,7 +119,9 @@ void UpdateDialog::Download() {
     // Progress dialog.
     auto progress_callback = [&](size_t processed_size, size_t total_size) {
         QGuiApplication::processEvents();
-        progress->setValue(static_cast<int>((processed_size * 100) / total_size));
+        if (total_size != 0) {
+            progress->setValue(static_cast<int>((processed_size * 100) / total_size));
+        }
         return !progress->wasCanceled();
     };
 
@@ -139,13 +142,6 @@ void UpdateDialog::Download() {
     auto result = client->Get(m_asset.path, content_receiver, progress_callback);
     progress->close();
 
-    // commit to file
-    if (!file.commit()) {
-        LOG_WARNING(Frontend, "Could not commit to file {}", filename.toStdString());
-        QtCommon::Frontend::Critical(tr("Failed to save file"),
-                                     tr("Could not commit to file %1.").arg(filename));
-    }
-
     if (!result) {
         LOG_ERROR(Frontend, "GET to {}{} returned null", m_asset.url, m_asset.path);
         return;
@@ -164,6 +160,13 @@ void UpdateDialog::Download() {
     }
     if (!response.has_header("content-type")) {
         LOG_ERROR(Frontend, "GET to {}{} returned no content", m_asset.url, m_asset.path);
+        return;
+    }
+
+    if (!file.commit()) {
+        LOG_WARNING(Frontend, "Could not commit to file {}", filename.toStdString());
+        QtCommon::Frontend::Critical(tr("Failed to save file"),
+                                     tr("Could not commit to file %1.").arg(filename));
         return;
     }
 

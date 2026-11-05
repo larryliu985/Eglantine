@@ -3,9 +3,13 @@
 
 #include "shader_recompiler/backend/glsl/emit_glsl_instructions.h"
 #include "shader_recompiler/backend/glsl/glsl_emit_context.h"
+#include "shader_recompiler/shader_info.h"
 
 namespace Shader::Backend::GLSL {
 void EmitBarrier(EmitContext& ctx) {
+    if (ctx.info.requires_coherent_global_memory || ctx.info.requires_coherent_image_memory) {
+        ctx.Add("groupMemoryBarrier();");
+    }
     ctx.Add("barrier();");
 }
 

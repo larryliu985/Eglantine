@@ -59,9 +59,13 @@ public:
     }
 
     void MapAt(u64 gpu_address, u64 cpu_address, u64 size) {
+        MapAt(0, 0, gpu_address, cpu_address, size);
+    }
+
+    void MapAt(u32 handle, u64 offset, u64 gpu_address, u64 cpu_address, u64 size) {
         std::scoped_lock lk{mutex};
         TrimMappings(gpu_address, size);
-        mappings.push_back({gpu_address, cpu_address, size});
+        mappings.push_back({gpu_address, cpu_address, size, handle, offset});
         for (auto& [owner, listener] : listeners) {
             listener.map(gpu_address, cpu_address, size);
         }
@@ -231,6 +235,32 @@ public:
         return range.second + (cpu_address - start);
     }
 
+    std::optional<u64> GpuAddressOf(u32 handle, u64 offset) {
+        std::scoped_lock lk{mutex};
+        for (auto it = mappings.rbegin(); it != mappings.rend(); ++it) {
+            if (handle != 0 && it->handle == handle && offset >= it->offset &&
+                offset - it->offset < it->size) {
+                return it->gpu_address + (offset - it->offset);
+            }
+        }
+        return std::nullopt;
+    }
+
+    std::optional<u64> DeviceAddressOfGpu(u64 gpu_address) {
+        std::optional<u64> cpu_address;
+        {
+            std::scoped_lock lk{mutex};
+            for (const auto& mapping : mappings) {
+                if (gpu_address >= mapping.gpu_address &&
+                    gpu_address - mapping.gpu_address < mapping.size) {
+                    cpu_address = mapping.cpu_address + (gpu_address - mapping.gpu_address);
+                    break;
+                }
+            }
+        }
+        return cpu_address ? DeviceAddressOf(*cpu_address) : std::nullopt;
+    }
+
 private:
     // Separate lock: ranges are recorded from listeners that run under `mutex`.
     std::mutex device_mutex;
@@ -252,6 +282,8 @@ private:
         u64 gpu_address;
         u64 cpu_address;
         u64 size;
+        u32 handle;
+        u64 offset;
     };
 
     struct Listeners {
@@ -275,10 +307,12 @@ private:
                 continue;
             }
             if (m.gpu_address < gpu_address) {
-                kept.push_back({m.gpu_address, m.cpu_address, gpu_address - m.gpu_address});
+                kept.push_back({m.gpu_address, m.cpu_address, gpu_address - m.gpu_address,
+                                m.handle, m.offset});
             }
             if (m_end > end) {
-                kept.push_back({end, m.cpu_address + (end - m.gpu_address), m_end - end});
+                kept.push_back({end, m.cpu_address + (end - m.gpu_address), m_end - end,
+                                m.handle, m.offset + (end - m.gpu_address)});
             }
         }
         mappings = std::move(kept);

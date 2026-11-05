@@ -118,7 +118,32 @@ void CheckCBufNVN(Info& info, IR::Inst& inst) {
     }
 }
 
+/// Records the features, types and resources an instruction needs in the shader info
 void VisitUsages(Info& info, IR::Inst& inst) {
+    switch (inst.GetOpcode()) {
+    case IR::Opcode::ImageRead:
+    case IR::Opcode::ImageWrite:
+        info.requires_coherent_image_memory |= inst.Flags<IR::TextureInstInfo>().image_coherent != 0;
+        break;
+    case IR::Opcode::LoadGlobalU8:
+    case IR::Opcode::LoadGlobalS8:
+    case IR::Opcode::LoadGlobalU16:
+    case IR::Opcode::LoadGlobalS16:
+    case IR::Opcode::LoadGlobal32:
+    case IR::Opcode::LoadGlobal64:
+    case IR::Opcode::LoadGlobal128:
+    case IR::Opcode::LoadStorageU8:
+    case IR::Opcode::LoadStorageS8:
+    case IR::Opcode::LoadStorageU16:
+    case IR::Opcode::LoadStorageS16:
+    case IR::Opcode::LoadStorage32:
+    case IR::Opcode::LoadStorage64:
+    case IR::Opcode::LoadStorage128:
+        info.requires_coherent_global_memory |= inst.Flags<bool>();
+        break;
+    default:
+        break;
+    }
     switch (inst.GetOpcode()) {
     case IR::Opcode::CompositeConstructF16x2:
     case IR::Opcode::CompositeConstructF16x3:
@@ -388,6 +413,7 @@ void VisitUsages(Info& info, IR::Inst& inst) {
     case IR::Opcode::GlobalAtomicOr32:
     case IR::Opcode::GlobalAtomicXor32:
     case IR::Opcode::GlobalAtomicExchange32:
+    case IR::Opcode::GlobalAtomicCompareExchange32:
     case IR::Opcode::GlobalAtomicIAdd64:
     case IR::Opcode::GlobalAtomicSMin64:
     case IR::Opcode::GlobalAtomicUMin64:
@@ -488,6 +514,11 @@ void VisitUsages(Info& info, IR::Inst& inst) {
     case IR::Opcode::IsTextureScaled:
     case IR::Opcode::IsImageScaled:
         info.uses_rescaling_uniform = true;
+        break;
+    case IR::Opcode::TensorMulAdd:
+        info.uses_subgroup_shuffles = true;
+        info.uses_fp32_denorms_preserve = true;
+        info.uses_subgroup_invocation_id = true;
         break;
     case IR::Opcode::LaneId:
         info.uses_subgroup_invocation_id = true;
@@ -630,6 +661,7 @@ void VisitUsages(Info& info, IR::Inst& inst) {
     case IR::Opcode::StorageAtomicOr32:
     case IR::Opcode::StorageAtomicXor32:
     case IR::Opcode::StorageAtomicExchange32:
+    case IR::Opcode::StorageAtomicCompareExchange32:
         info.used_storage_buffer_types |= IR::Type::U32;
         break;
     case IR::Opcode::LoadStorage64:

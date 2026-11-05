@@ -57,12 +57,10 @@ int SpirvShaderRecompilerImpl(int argc, char *argv[]) {
 
     // IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Block>& block_pool,
     //                              Environment& env, Flow::CFG& cfg, const HostTranslateInfo& host_info)
-    // std::vector<u32> EmitSPIRV(const Profile& profile, const RuntimeInfo& runtime_info,
-    //                            IR::Program& program, Bindings& bindings, bool optimize)
     Shader::Profile profile{};
     Shader::RuntimeInfo runtime_info;
-    auto const spirv_pgm = Shader::Backend::SPIRV::EmitSPIRV(profile, program, true);
-    fwrite(spirv_pgm.data(), sizeof(u64), spirv_pgm.size(), stdout);
+    auto const spirv_pgm = Shader::Backend::SPIRV::EmitSPIRV(profile, program);
+    fwrite(spirv_pgm.data(), sizeof(u32), spirv_pgm.size(), stdout);
 
     return EXIT_SUCCESS;
 }

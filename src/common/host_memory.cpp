@@ -22,6 +22,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include "common/scope_exit.h"
+#include "common/settings.h"
 
 #if defined(__linux__)
 #include <sys/random.h>
@@ -51,6 +52,8 @@
 
 #endif // ^^^ POSIX ^^^
 
+#include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <mutex>
 #include <random>
@@ -412,7 +415,7 @@ private:
 #define MAP_NOCORE 0
 #endif
 
-#ifdef ARCHITECTURE_arm64
+#if defined(ARCHITECTURE_arm64) && !defined(__APPLE__)
 
 static void* ChooseVirtualBase(size_t virtual_size) {
     constexpr uintptr_t Map39BitSize = (1ULL << 39);
@@ -528,8 +531,19 @@ public:
 #endif
 
     bool Init() {
-        long page_size = sysconf(_SC_PAGESIZE);
-        ASSERT_MSG(page_size == 0x1000, "page size {:#x} is incompatible with 4K paging", page_size);
+        const long page_size = sysconf(_SC_PAGESIZE);
+        if (page_size < static_cast<long>(PageAlignment) ||
+            page_size % static_cast<long>(PageAlignment) != 0) {
+            LOG_WARNING(Common_Memory, "Host page size {:#x} does not support fastmem", page_size);
+            return false;
+        }
+#ifdef HAS_NCE
+        if (page_size != static_cast<long>(PageAlignment) && Settings::IsNceEnabled()) {
+            LOG_WARNING(Common_Memory, "Host page size {:#x} does not support fastmem with NCE", page_size);
+            return false;
+        }
+#endif
+        host_page_size = static_cast<size_t>(page_size);
         // Backing memory initialization
 #if defined(__sun__) || defined(__HAIKU__) || defined(__NetBSD__) || defined(__DragonFly__)
         fd = shm_open_anon(O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
@@ -537,7 +551,20 @@ public:
         fd = shm_open_anon(O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
 #elif defined(__FreeBSD__)
         fd = shm_open(SHM_ANON, O_RDWR, 0600);
-#elif defined(__APPLE__) || defined(__managarm__)
+#elif defined(__APPLE__)
+        char shm_name[32];
+        std::snprintf(shm_name, sizeof(shm_name), "/eden_mem_%d", int(getpid()));
+        fd = shm_open(shm_name, O_RDWR | O_CREAT | O_EXCL, 0600);
+        if (fd >= 0) {
+            shm_unlink(shm_name);
+        } else {
+            char template_path[] = "/tmp/eden_mem_XXXXXX";
+            fd = mkstemp(template_path);
+            if (fd >= 0) {
+                unlink(template_path);
+            }
+        }
+#elif defined(__managarm__)
         // macOS doesn't have memfd_create, use anonymous temporary file
         char template_path[] = "/tmp/eden_mem_XXXXXX";
         fd = mkstemp(template_path);
@@ -585,6 +612,24 @@ public:
         madvise(virtual_base, virtual_size, MADV_HUGEPAGE);
 #endif
         free_manager.SetAddressSpace(virtual_base, virtual_size);
+
+        if (host_page_size != PageAlignment) {
+            if (fd < 0 || virtual_size % host_page_size != 0) {
+                LOG_WARNING(Common_Memory, "Can't emulate {:#x} byte pages with host page size {:#x}",
+                            PageAlignment, host_page_size);
+                return false;
+            }
+            page_states_size = (virtual_size / PageAlignment) * sizeof(u32);
+            void* const states = mmap(nullptr, page_states_size, PROT_READ | PROT_WRITE,
+                                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+            if (states == MAP_FAILED) {
+                LOG_CRITICAL(HW_Memory, "mmap failed: {}", strerror(errno));
+                return false;
+            }
+            page_states = static_cast<u32*>(states);
+            LOG_INFO(Common_Memory, "Fastmem maps {:#x} byte host pages whose guest pages are contiguous",
+                     host_page_size);
+        }
         return true;
     }
 
@@ -602,7 +647,26 @@ public:
 
     void Map(size_t virtual_offset, size_t host_offset, size_t length, MemoryPermission perms) {
         // Intersect the range with our address space.
+        const size_t intended_offset = virtual_offset;
         AdjustMap(&virtual_offset, &length);
+        if (length != 0) {
+            host_offset += virtual_offset - intended_offset;
+        }
+
+        if (page_states) {
+            if (length == 0) {
+                return;
+            }
+            std::scoped_lock lk{page_states_mutex};
+            const size_t first = StateIndex(virtual_offset);
+            const u32 state = PageMapped | PermissionBits(perms);
+            for (size_t i = 0; i < length / PageAlignment; ++i) {
+                const u32 host_page = static_cast<u32>(host_offset / PageAlignment + i);
+                page_states[first + i] = state | (host_page << PageOffsetShift);
+            }
+            UpdateHostPages(virtual_offset, length, true);
+            return;
+        }
 
         // We are removing a placeholder.
         free_manager.AllocateBlock(virtual_base + virtual_offset, length);
@@ -629,6 +693,16 @@ public:
         // Intersect the range with our address space.
         AdjustMap(&virtual_offset, &length);
 
+        if (page_states) {
+            if (length == 0) {
+                return;
+            }
+            std::scoped_lock lk{page_states_mutex};
+            std::fill_n(page_states + StateIndex(virtual_offset), length / PageAlignment, 0u);
+            UpdateHostPages(virtual_offset, length, true);
+            return;
+        }
+
         // Merge with any adjacent placeholder mappings.
         auto [merged_pointer, merged_size] =
             free_manager.FreeBlock(virtual_base + virtual_offset, length);
@@ -640,6 +714,21 @@ public:
     void Protect(size_t virtual_offset, size_t length, bool read, bool write, bool execute) {
         // Intersect the range with our address space.
         AdjustMap(&virtual_offset, &length);
+
+        if (page_states) {
+            if (length == 0) {
+                return;
+            }
+            const u32 bits = (read ? PageRead : 0u) | (write ? PageWrite : 0u) |
+                             (execute ? PageExecute : 0u);
+            std::scoped_lock lk{page_states_mutex};
+            u32* const states = page_states + StateIndex(virtual_offset);
+            for (size_t i = 0; i < length / PageAlignment; ++i) {
+                states[i] = (states[i] & ~PagePermissionMask) | bits;
+            }
+            UpdateHostPages(virtual_offset, length, false);
+            return;
+        }
 
         int flags = PROT_NONE;
         if (read) {
@@ -671,6 +760,10 @@ public:
 private:
     /// Release all resources in the object
     void Release() {
+        if (page_states != nullptr) {
+            munmap(page_states, page_states_size);
+        }
+
         if (virtual_map_base != MAP_FAILED) {
             int ret = munmap(virtual_map_base, virtual_size);
             ASSERT_MSG(ret == 0, "munmap failed: {}", strerror(errno));
@@ -708,8 +801,105 @@ private:
         }
     }
 
+    static constexpr u32 PageRead = 1u << 0;
+    static constexpr u32 PageWrite = 1u << 1;
+    static constexpr u32 PageExecute = 1u << 2;
+    static constexpr u32 PagePermissionMask = PageRead | PageWrite | PageExecute;
+    static constexpr u32 PageMapped = 1u << 3;
+    static constexpr u32 PageOffsetShift = 4;
+
+    static u32 PermissionBits(MemoryPermission perms) {
+        return (True(perms & MemoryPermission::Read) ? PageRead : 0u) |
+               (True(perms & MemoryPermission::Write) ? PageWrite : 0u) |
+               (True(perms & MemoryPermission::Execute) ? PageExecute : 0u);
+    }
+
+    static int ProtectionFlags(u32 bits) {
+        int prot = PROT_NONE;
+        if ((bits & PageRead) != 0) {
+            prot |= PROT_READ;
+        }
+        if ((bits & PageWrite) != 0) {
+            prot |= PROT_WRITE;
+        }
+#ifdef HAS_NCE
+        if ((bits & PageExecute) != 0) {
+            prot |= PROT_EXEC;
+        }
+#endif
+        return prot;
+    }
+
+    struct HostPage {
+        bool mapped;
+        size_t host_offset;
+        int prot;
+    };
+
+    size_t StateIndex(size_t virtual_offset) const {
+        const size_t base = virtual_base != nullptr ? 0 : reinterpret_cast<size_t>(virtual_map_base);
+        return (virtual_offset - base) / PageAlignment;
+    }
+
+    HostPage ResolveHostPage(size_t virtual_offset) const {
+        const u32* const states = page_states + StateIndex(virtual_offset);
+        const u32 first = states[0];
+        const size_t host_offset = size_t(first >> PageOffsetShift) * PageAlignment;
+        if ((first & PageMapped) == 0 || host_offset % host_page_size != 0) {
+            return {};
+        }
+        u32 permissions = first & PagePermissionMask;
+        for (size_t i = 1; i < host_page_size / PageAlignment; ++i) {
+            const u32 state = states[i];
+            if ((state & PageMapped) == 0 || (state >> PageOffsetShift) != (first >> PageOffsetShift) + i) {
+                return {};
+            }
+            permissions &= state;
+        }
+        return {true, host_offset, ProtectionFlags(permissions)};
+    }
+
+    void UpdateHostPages(size_t virtual_offset, size_t length, bool remap) {
+        const size_t begin = AlignDown(virtual_offset, host_page_size);
+        const size_t end = AlignUp(virtual_offset + length, host_page_size);
+        const auto apply = [&](size_t run_begin, size_t run_end, const HostPage& page) {
+            u8* const address = virtual_base + run_begin;
+            const size_t size = run_end - run_begin;
+            if (!page.mapped) {
+                if (remap) {
+                    void* ret = mmap(address, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+                    ASSERT_MSG(ret != MAP_FAILED, "mmap: {}", strerror(errno));
+                }
+            } else if (remap) {
+                void* ret = mmap(address, size, page.prot, MAP_SHARED | MAP_FIXED, fd, off_t(page.host_offset));
+                ASSERT_MSG(ret != MAP_FAILED, "mmap: {}", strerror(errno));
+            } else {
+                int ret = mprotect(address, size, page.prot);
+                ASSERT_MSG(ret == 0, "mprotect failed: {}", strerror(errno));
+            }
+        };
+        size_t run_begin = begin;
+        HostPage run = ResolveHostPage(begin);
+        for (size_t offset = begin + host_page_size; offset < end; offset += host_page_size) {
+            const HostPage page = ResolveHostPage(offset);
+            const bool continues = page.mapped == run.mapped &&
+                                   (!page.mapped || (page.prot == run.prot &&
+                                                     page.host_offset == run.host_offset + (offset - run_begin)));
+            if (!continues) {
+                apply(run_begin, offset, run);
+                run_begin = offset;
+                run = page;
+            }
+        }
+        apply(run_begin, end, run);
+    }
+
     int fd{-1}; // memfd file descriptor, -1 is the error value of memfd_create
     FreeRegionManager free_manager{};
+    size_t host_page_size{PageAlignment};
+    u32* page_states{};
+    size_t page_states_size{};
+    std::mutex page_states_mutex;
 };
 
 #endif // ^^^ POSIX ^^^

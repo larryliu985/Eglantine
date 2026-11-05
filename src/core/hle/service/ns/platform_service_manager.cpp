@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <vector>
 #include <boost/container/static_vector.hpp>
@@ -233,15 +234,12 @@ void IPlatformServiceManager::GetBuiltInFontData(HLERequestContext& ctx) {
     const FontRegion region = found ? regions[type] : EMPTY_REGION;
     LOG_WARNING(Service_NS, "(STUBBED) Switch 2 GetBuiltInFontData type={} flag={} -> offset={:#x} size={:#x}",
                 type, flag, region.offset, region.size);
-    // Raw reply: the bool at offset 0, the descriptor at offset 8.
-    IPC::ResponseBuilder rb{ctx, 2 + 6};
+    IPC::ResponseBuilder rb{ctx, 2 + 4};
     rb.Push(ResultSuccess);
     rb.Push<u32>(found ? 1 : 0);
     rb.Push<u32>(0);
-    rb.Push<u32>(0);
     rb.Push<u32>(region.offset);
     rb.Push<u32>(region.size);
-    rb.Push<u32>(0);
 }
 
 IPlatformServiceManager::~IPlatformServiceManager() {

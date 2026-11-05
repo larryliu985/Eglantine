@@ -132,8 +132,12 @@ void ConfigurePerGameAddons::ApplyConfiguration() {
 }
 
 void ConfigurePerGameAddons::LoadFromFile(FileSys::VirtualFile file_) {
-    file = std::move(file_);
+    SetFile(std::move(file_));
     LoadConfiguration();
+}
+
+void ConfigurePerGameAddons::SetFile(FileSys::VirtualFile file_) {
+    file = std::move(file_);
 }
 
 void ConfigurePerGameAddons::SetTitleId(u64 id) {

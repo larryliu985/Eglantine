@@ -85,6 +85,12 @@ public:
     /// Native argument tables mix pointers with scalars (sizes, strides).
     [[nodiscard]] virtual bool IsCbufStorageBufferPointer(u32, u32) { return true; }
 
+    /// Native programs: whether the 8 bytes at `indirect` past the pointer at (index, offset) are
+    /// a mapped GPU address (a pointer table the program loads its buffer pointer from).
+    [[nodiscard]] virtual bool IsCbufIndirectStorageBufferPointer(u32, u32, u32) {
+        return true;
+    }
+
     [[nodiscard]] virtual u32 ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) = 0;
 
     [[nodiscard]] virtual TextureType ReadTextureType(u32 raw_handle) = 0;
@@ -104,6 +110,8 @@ public:
     [[nodiscard]] virtual std::array<u32, 3> WorkgroupSize() const = 0;
 
     [[nodiscard]] virtual bool HasHLEMacroState() const = 0;
+
+    [[nodiscard]] virtual bool HasNativeInstructions() const { return false; }
 
     [[nodiscard]] virtual std::optional<ReplaceConstant> GetReplaceConstBuffer(u32 bank,
                                                                                u32 offset) = 0;

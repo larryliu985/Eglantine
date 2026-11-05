@@ -88,7 +88,7 @@ void ComputePipeline::Configure() {
     for (const auto& desc : info.storage_buffers_descriptors) {
         ASSERT(desc.count == 1);
         buffer_cache.BindComputeStorageBuffer(ssbo_index, desc.cbuf_index, desc.cbuf_offset,
-                                              desc.is_written);
+                                              desc.is_written, desc.indirect_offset);
         ++ssbo_index;
     }
     texture_cache.SynchronizeDescriptors(true);
@@ -127,7 +127,7 @@ void ComputePipeline::Configure() {
                       std::is_same_v<decltype(desc), const Shader::TextureBufferDescriptor&>) {
             if (desc.has_secondary) {
                 ASSERT(((qmd.const_buffer_enable_mask >> desc.secondary_cbuf_index) & 1) != 0);
-                const u32 secondary_offset{desc.secondary_cbuf_offset + index_offset};
+                const u32 secondary_offset{desc.secondary_cbuf_offset};
                 const GPUVAddr separate_addr{cbufs[desc.secondary_cbuf_index].Address() +
                                              secondary_offset};
                 const u32 lhs_raw{gpu_memory->Read<u32>(addr) << desc.shift_left};
@@ -241,10 +241,11 @@ void ComputePipeline::Configure() {
     for (const auto& desc : info.image_descriptors) {
         for (u32 index = 0; index < desc.count; ++index) {
             ImageView& image_view{texture_cache.GetImageView((views_it++)->id)};
+            images[image_binding] =
+                image_view.StorageView(desc.type, desc.format, desc.is_byte_addressed);
             if (desc.is_written) {
                 texture_cache.MarkModification(image_view.image_id);
             }
-            images[image_binding] = image_view.StorageView(desc.type, desc.format);
             if (texture_cache.IsRescaling(image_view)) {
                 image_scaling_mask |= 1u << image_binding;
             }

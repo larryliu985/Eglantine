@@ -1,4 +1,4 @@
-# Switch NX2 - read when the Eglantine GUI starts.
+# Switch NX2 - read when the Lichii GUI starts.
 # One NAME=VALUE per line. Lines starting with # are ignored.
 # A variable already set in the environment wins over this file.
 # Between files, the user copy (%APPDATA%\eden\nx2_switches.txt, or

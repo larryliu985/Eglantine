@@ -1,7 +1,7 @@
 name: UI Bug
 description: UI Doesnt works as expected
 title: "[UIBug] "
-labels: ["bug", "Eglantine-UI"]
+labels: ["bug", "Lichii-UI"]
 body:
   - type: checkboxes
     id: checks

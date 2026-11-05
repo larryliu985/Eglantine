@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "common/logging.h"
 #include "video_core/host1x/syncpoint_manager.h"
 
 namespace Tegra {
@@ -30,19 +31,18 @@ SyncpointManager::ActionHandle SyncpointManager::RegisterAction(
         }
         ++it;
     }
-    return action_storage.emplace(it, expected_value, std::move(action));
+    return action_storage.emplace(it, expected_value, ++last_action_id, std::move(action))->id;
 }
 
 void SyncpointManager::DeregisterAction(std::list<RegisteredAction>& action_storage,
                                         const ActionHandle& handle) {
+    if (handle == 0) {
+        return;
+    }
     std::scoped_lock lk(guard);
 
-    // We want to ensure the iterator still exists prior to erasing it
-    // Otherwise, if an invalid iterator was passed in then it could lead to UB
-    // It is important to avoid UB in that case since the deregister isn't called from a locked
-    // context
     for (auto it = action_storage.begin(); it != action_storage.end(); it++) {
-        if (it == handle) {
+        if (it->id == handle) {
             action_storage.erase(it);
             return;
         }
@@ -58,10 +58,17 @@ void SyncpointManager::DeregisterHostAction(u32 syncpoint_id, const ActionHandle
 }
 
 void SyncpointManager::IncrementGuest(u32 syncpoint_id) {
+    if (syncpoint_id >= NUM_MAX_SYNCPOINTS) {
+        LOG_ERROR(HW_GPU, "Ignoring increment of invalid syncpoint {:#x}", syncpoint_id);
+        return;
+    }
     Increment(syncpoints_guest[syncpoint_id], wait_guest_cv, guest_action_storage[syncpoint_id]);
 }
 
 void SyncpointManager::IncrementHost(u32 syncpoint_id) {
+    if (syncpoint_id >= NUM_MAX_SYNCPOINTS) {
+        return;
+    }
     Increment(syncpoints_host[syncpoint_id], wait_host_cv, host_action_storage[syncpoint_id]);
 }
 

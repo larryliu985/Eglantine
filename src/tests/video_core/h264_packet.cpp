@@ -106,3 +106,28 @@ TEST_CASE("H264 malformed packets are never partially converted", "[video_core][
         CHECK(packet == input);
     }
 }
+
+TEST_CASE("H264 framing is learned again after a stream reset", "[video_core][h264]") {
+    Tegra::Host1x::H264PacketConverter converter;
+    Bytes annex_b{0, 0, 1, 0x67, 0x42, 0x55};
+    converter.Convert(annex_b);
+    converter.Reset();
+
+    Bytes length_prefixed{0, 0, 0, 2, 0x67, 0x55};
+    converter.Convert(length_prefixed);
+    REQUIRE(length_prefixed == Bytes{0, 0, 0, 1, 0x67, 0x55});
+    converter.Reset();
+
+    const Bytes first{0, 0, 1, 0x67, 0x42, 0x55};
+    annex_b = first;
+    converter.Convert(annex_b);
+    REQUIRE(annex_b == first);
+
+    Bytes ambiguous(325, 0x41);
+    ambiguous[0] = 0;
+    ambiguous[1] = 0;
+    ambiguous[2] = 1;
+    const auto expected = ambiguous;
+    converter.Convert(ambiguous);
+    REQUIRE(ambiguous == expected);
+}

@@ -56,6 +56,7 @@ void TranslatorVisitor::MUFU(u64 insn) {
         case Operation::Sqrt:
             return ir.FPSqrt(op_a);
         case Operation::Tanh:
+            if (!env.HasNativeInstructions()) throw NotImplementedException("Maxwell MUFU.TANH");
             return ir.FPTanh(op_a);
         default:
             throw NotImplementedException("Invalid MUFU operation {}", mufu.operation.Value());

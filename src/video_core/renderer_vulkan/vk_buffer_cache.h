@@ -69,6 +69,10 @@ public:
         return last_usage_tick;
     }
 
+    [[nodiscard]] std::span<const u8> Mapped() const noexcept {
+        return buffer.IsHostCoherent() ? buffer.Mapped() : std::span<const u8>{};
+    }
+
     operator VkBuffer() const noexcept {
         return *buffer;
     }
@@ -160,6 +164,12 @@ public:
                          u32 base_vertex, VkBuffer buffer, u32 offset, u32 size);
 
     void BindQuadIndexBuffer(PrimitiveTopology topology, u32 first, u32 count);
+
+    bool WidensUint8IndicesOnHost() const {
+        return device.IsMoltenVK() && !device.IsExtIndexTypeUint8Supported();
+    }
+
+    void BindHostUint8IndexBuffer(std::span<const u8> indices);
 
     void BindVertexBuffer(u32 index, VkBuffer buffer, u32 offset, u32 size, u32 stride);
 

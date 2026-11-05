@@ -30,6 +30,8 @@
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/memory_manager.h"
+#include "video_core/pipeline_cache_files.h"
+#include "video_core/renderer_vulkan/async_draw_policy.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
@@ -66,7 +68,7 @@ using VideoCommon::FileEnvironment;
 using VideoCommon::GenericEnvironment;
 using VideoCommon::GraphicsEnvironment;
 
-constexpr u32 CACHE_VERSION = 21;
+constexpr u32 CACHE_VERSION = VideoCommon::VulkanPipelineCacheVersion;
 constexpr size_t VULKAN_CACHE_FLUSH_PIPELINES = 128;
 constexpr size_t VULKAN_CACHE_FLUSH_MIN_SECONDS = 30;
 constexpr std::array<char, 8> VULKAN_CACHE_MAGIC_NUMBER{'y', 'u', 'z', 'u', 'v', 'k', 'c', 'h'};
@@ -535,6 +537,7 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         .support_geometry_shader_passthrough = device.IsNvGeometryShaderPassthroughSupported(),
         .support_conditional_barrier = device.SupportsConditionalBarriers(),
         .single_lane_geometry_subgroups = !profile.SupportsSubgroupStage(Shader::Stage::Geometry),
+        .support_byte_addressed_r16 = true,
     };
     host_info.ApplyDescriptorLimitPolicy();
 
@@ -699,15 +702,6 @@ void PipelineCache::SaveUsedPipelines() {
     }
 }
 
-bool PipelineCache::IsIndirectResetShader() const {
-    constexpr size_t vertex_b = static_cast<size_t>(Maxwell::ShaderType::VertexB);
-    constexpr u64 reset_key = 0x72fd62555e7196cdULL;
-    const auto* info = shader_infos[vertex_b];
-    return maxwell3d->regs.IsShaderConfigEnabled(vertex_b) && info && info->lowered_native &&
-           info->lowered_native->source_size == 128 + 11 * 16 &&
-           info->lowered_native->diagnostic_key == reset_key;
-}
-
 GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
 
     if (!RefreshStages(graphics_key.unique_hashes)) {
@@ -727,6 +721,17 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
     return CurrentGraphicsPipelineSlowPath();
 }
 
+ComputePipeline* ComputePipelineCacheEntry::Get(bool native, GPUVAddr address,
+                                                const ComputePipelineCacheKey& key) const {
+    if (!pipeline && native) {
+        throw Shader::RuntimeError(
+            "Native compute pipeline unavailable: address={:#x} shader={:#016x} pipeline={:#016x}: {}",
+            address, key.unique_hash, key.Hash(),
+            failure.empty() ? "No compiler diagnostic was recorded" : failure);
+    }
+    return pipeline.get();
+}
+
 ComputePipeline* PipelineCache::CurrentComputePipeline() {
 
     const ShaderInfo* const shader{ComputeShader()};
@@ -740,12 +745,12 @@ ComputePipeline* PipelineCache::CurrentComputePipeline() {
         .workgroup_size{qmd.block_dim_x, qmd.block_dim_y, qmd.block_dim_z},
     };
     const auto [pair, is_new]{compute_cache.try_emplace(key)};
-    auto& pipeline{pair->second};
-    if (!is_new) {
-        return pipeline.get();
+    auto& entry{pair->second};
+    if (is_new) {
+        entry = CreateComputePipeline(key, shader);
     }
-    pipeline = CreateComputePipeline(key, shader);
-    return pipeline.get();
+    return entry.Get(kepler_compute->IsNativeMode(),
+                     kepler_compute->regs.code_loc.Address() + qmd.program_start, key);
 }
 
 void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading,
@@ -767,15 +772,18 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         LOG_ERROR(Common_Filesystem, "Failed to create pipeline cache directories");
         return;
     }
-    pipeline_cache_filename = base_dir / "vulkan.bin";
-    used_pipelines_filename = base_dir / "vulkan_used.bin";
+    pipeline_cache_filename =
+        VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan", CACHE_VERSION);
+    used_pipelines_filename =
+        VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_used", CACHE_VERSION);
     used_pipelines = LoadUsedPipelines(used_pipelines_filename, MaxUsedPipelineAge(device));
     used_pipelines_saved = std::chrono::steady_clock::now();
     size_t skipped_pipelines = 0;
     size_t queued_graphics = 0;
 
     if (use_vulkan_pipeline_cache) {
-        vulkan_pipeline_cache_filename = base_dir / "vulkan_pipelines.bin";
+        vulkan_pipeline_cache_filename =
+            VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_pipelines", CACHE_VERSION);
         vulkan_pipeline_cache =
             LoadVulkanPipelineCache(vulkan_pipeline_cache_filename, CACHE_VERSION);
     }
@@ -797,10 +805,10 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
 
         workers.QueueWork([this, key, env_ = std::move(env), &state, &callback]() mutable {
             ShaderPools pools;
-            auto pipeline{CreateComputePipeline(pools, key, env_, state.statistics.get(), false)};
+            auto entry{CreateComputePipeline(pools, key, env_, state.statistics.get(), false)};
             std::scoped_lock lock{state.mutex};
-            if (pipeline) {
-                compute_cache.emplace(key, std::move(pipeline));
+            if (entry.pipeline) {
+                compute_cache.emplace(key, std::move(entry));
             }
             ++state.built;
             if (state.has_loaded) {
@@ -1077,19 +1085,12 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const
     if (!use_asynchronous_shaders) {
         return pipeline;
     }
-    // If something is using depth, we can assume that games are not rendering anything which
-    // will be used one time.
-    if (maxwell3d->regs.zeta_enable) {
-        return nullptr;
-    }
-    // If games are using a small index count, we can assume these are full screen quads.
-    // Usually these shaders are only used once for building textures so we can assume they
-    // can't be built async
     const auto& draw_state = maxwell3d->draw_manager.draw_state;
-    if (draw_state.draw_element_count <= 6) {
-        return pipeline;
-    }
-    return nullptr;
+    const bool discard = CanDiscardPendingDraw(maxwell3d->GetNativeMacroEngine().native_turing,
+                                              maxwell3d->regs.zeta_enable != 0,
+                                              draw_state.draw_element_count,
+                                              draw_state.draw_element_count);
+    return discard ? nullptr : pipeline;
 }
 
 std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
@@ -1163,6 +1164,42 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
 
         if (programs[index].info.requires_layer_emulation) {
             layer_source_program = &programs[index];
+        }
+    }
+    // A tessellation pipeline the driver would refuse is skipped like a missing mesh pipeline:
+    // the draw is dropped (see the pipeline check in the rasterizer) instead of failing the build.
+    {
+        const Shader::IR::Program* control{};
+        const Shader::IR::Program* evaluation{};
+        for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
+            if (key.unique_hashes[index] == 0) {
+                continue;
+            }
+            if (programs[index].stage == Shader::Stage::TessellationControl) {
+                control = &programs[index];
+            } else if (programs[index].stage == Shader::Stage::TessellationEval) {
+                evaluation = &programs[index];
+            }
+        }
+        if (control != nullptr || evaluation != nullptr) {
+            const u32 max_patch_size = device.GetMaxTessellationPatchSize();
+            const char* reason = nullptr;
+            if (!device.IsTessellationSupported()) {
+                reason = "the device has no tessellation shaders";
+            } else if (control == nullptr || evaluation == nullptr) {
+                reason = "it has only one of the control and evaluation stages";
+            } else if (control->invocations == 0 || control->invocations > max_patch_size) {
+                reason = "the control shader's output vertex count is out of range";
+            }
+            if (reason != nullptr) {
+                LOG_WARNING(Render_Vulkan,
+                            "Skipping tessellation pipeline: {} (tcs={} tes={}, tcs output "
+                            "vertices {}, patch control points {}, device max patch size {})",
+                            reason, control != nullptr, evaluation != nullptr,
+                            control != nullptr ? control->invocations : 0,
+                            key.state.patch_control_points_minus_one.Value() + 1, max_patch_size);
+                return nullptr;
+            }
         }
     }
     std::array<const Shader::Info*, Maxwell::MaxShaderStage> infos{};
@@ -1244,9 +1281,10 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
 
 namespace {
 // Pipelines built on the GPU thread at run time (shader translation; the driver compile is on
-// workers): every one over 2 ms is logged, and the total every 10 s, to tell how much of the
-// stutter on new content is translation.
-void ReportRuntimePipeline(const char* kind, std::chrono::steady_clock::time_point begin) {
+// workers): the first 400 over 2 ms and every one over 100 ms are logged, and the total every
+// 10 s, to tell how much of the stutter on new content is translation.
+void ReportRuntimePipeline(const char* kind, std::chrono::steady_clock::time_point begin,
+                           const std::string& shaders) {
     static std::chrono::steady_clock::duration total{};
     static u32 count{}, logged{};
     static auto window = std::chrono::steady_clock::now();
@@ -1255,9 +1293,13 @@ void ReportRuntimePipeline(const char* kind, std::chrono::steady_clock::time_poi
     total += elapsed;
     ++count;
     const auto ms = [](auto d) { return std::chrono::duration<double, std::milli>(d).count(); };
-    if (elapsed > std::chrono::milliseconds{2} && logged < 400) {
+    // Slow builds are always logged with their shaders, to find the programs that are slow to
+    // translate.
+    if (elapsed > std::chrono::milliseconds{100} ||
+        (elapsed > std::chrono::milliseconds{2} && logged < 400)) {
         ++logged;
-        LOG_INFO(Render_Vulkan, "{} pipeline built on the GPU thread in {:.1f} ms", kind, ms(elapsed));
+        LOG_INFO(Render_Vulkan, "{} pipeline built on the GPU thread in {:.1f} ms: {}", kind,
+                 ms(elapsed), shaders);
     }
     if (now - window > std::chrono::seconds{10}) {
         LOG_INFO(Render_Vulkan, "Runtime pipelines in the last 10 s: {} built, {:.1f} ms on the GPU thread",
@@ -1272,7 +1314,13 @@ void ReportRuntimePipeline(const char* kind, std::chrono::steady_clock::time_poi
 std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline() {
     const auto begin = std::chrono::steady_clock::now();
     SCOPE_EXIT {
-        ReportRuntimePipeline("Graphics", begin);
+        std::string shaders = fmt::format("pipeline={:016x}", graphics_key.Hash());
+        for (size_t stage = 0; stage < graphics_key.unique_hashes.size(); ++stage) {
+            if (graphics_key.unique_hashes[stage] != 0) {
+                shaders += fmt::format(" s{}:{:016x}", stage, graphics_key.unique_hashes[stage]);
+            }
+        }
+        ReportRuntimePipeline("Graphics", begin, shaders);
     };
     GraphicsEnvironments environments;
     GetGraphicsEnvironments(environments, graphics_key.unique_hashes);
@@ -1309,11 +1357,15 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline() {
     return pipeline;
 }
 
-std::unique_ptr<ComputePipeline> PipelineCache::CreateComputePipeline(
+ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
     const ComputePipelineCacheKey& key, const ShaderInfo* shader) {
     const auto begin = std::chrono::steady_clock::now();
     SCOPE_EXIT {
-        ReportRuntimePipeline("Compute", begin);
+        ReportRuntimePipeline("Compute", begin,
+                              fmt::format("pipeline={:016x} s6:{:016x} address={:#x}", key.Hash(),
+                                          key.unique_hash,
+                                          kepler_compute->regs.code_loc.Address() +
+                                              kepler_compute->launch_description.program_start));
     };
     const GPUVAddr program_base{kepler_compute->regs.code_loc.Address()};
     const auto& qmd{kepler_compute->launch_description};
@@ -1322,25 +1374,36 @@ std::unique_ptr<ComputePipeline> PipelineCache::CreateComputePipeline(
     env.SetCachedSize(shader->size_bytes);
 
     main_pools.ReleaseContents();
-    auto pipeline{CreateComputePipeline(main_pools, key, env, nullptr, true)};
-    if (!pipeline || pipeline_cache_filename.empty()) {
-        return pipeline;
+    auto entry{CreateComputePipeline(main_pools, key, env, nullptr, true)};
+    if (const char* directory = std::getenv("EDEN_NX2_SHADER_DUMP");
+        directory && !entry.pipeline && env.CanBeSerialized()) {
+        const auto path = std::filesystem::path{directory} /
+                          fmt::format("failed-compute-{:016x}-v{}.env", key.unique_hash, CACHE_VERSION);
+        std::ofstream file{path, std::ios::binary};
+        if (file) {
+            env.Serialize(file);
+            LOG_INFO(Render_Vulkan, "Captured failed compute environment: {} written={}",
+                     path.string(), file.good());
+        }
+    }
+    if (!entry.pipeline || pipeline_cache_filename.empty()) {
+        return entry;
     }
     serialization_thread.QueueWork([this, key, env_ = std::move(env)] {
         SerializePipeline(key, std::array<const GenericEnvironment*, 1>{&env_},
                           pipeline_cache_filename, CACHE_VERSION);
     });
     QueueVulkanPipelineCacheFlush();
-    return pipeline;
+    return entry;
 }
 
-std::unique_ptr<ComputePipeline> PipelineCache::CreateComputePipeline(
+ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
     ShaderPools& pools, const ComputePipelineCacheKey& key, Shader::Environment& env,
     PipelineStatistics* statistics, bool build_in_parallel) try {
     auto hash = key.Hash();
     if (device.HasBrokenCompute()) {
         LOG_ERROR(Render_Vulkan, "Skipping {:#016x}", hash);
-        return nullptr;
+        return {.failure = "Device reports broken compute support"};
     }
 
     LOG_DEBUG(Render_Vulkan, "{:#016x}", hash);
@@ -1391,15 +1454,15 @@ std::unique_ptr<ComputePipeline> PipelineCache::CreateComputePipeline(
         spv_module.SetObjectNameEXT(name.c_str());
     }
     Common::ThreadWorker* const thread_worker{build_in_parallel ? &workers : nullptr};
-    return std::make_unique<ComputePipeline>(device, scheduler, vulkan_pipeline_cache, descriptor_pool,
-                                             guest_descriptor_queue, descriptor_buffer_ring,
-                                             thread_worker, statistics,
-                                             &shader_notify, program.info, std::move(spv_module),
-                                             key.unique_hash);
+    return {.pipeline = std::make_unique<ComputePipeline>(
+                device, scheduler, vulkan_pipeline_cache, descriptor_pool, guest_descriptor_queue,
+                descriptor_buffer_ring, thread_worker, statistics, &shader_notify, program.info,
+                std::move(spv_module), key.unique_hash)};
 
 } catch (const Shader::Exception& exception) {
-    LOG_ERROR(Render_Vulkan, "{}", exception.what());
-    return nullptr;
+    LOG_ERROR(Render_Vulkan, "Compute pipeline compilation failed shader={:#016x} pipeline={:#016x}: {}",
+              key.unique_hash, key.Hash(), exception.what());
+    return {.failure = exception.what()};
 }
 
 void PipelineCache::SerializeVulkanPipelineCache(const std::filesystem::path& filename,

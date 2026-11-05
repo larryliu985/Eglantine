@@ -181,6 +181,11 @@ std::filesystem::path UseAppModel(const DlssFiles& files) {
             return {};
         }
     }
+    if (!IsSignedByNvidia(target)) {
+        LOG_WARNING(Render_Vulkan, "Cached DLSS {} is not signed by NVIDIA",
+                    Common::FS::PathToUTF8String(target));
+        return {};
+    }
     return dir;
 }
 
@@ -296,6 +301,11 @@ bool Start() {
     }
     if (!state.module) {
         const DlssFiles files = FindDlssFiles();
+        if (!files.model.empty() && !IsSignedByNvidia(files.model)) {
+            LOG_WARNING(Render_Vulkan, "DLSS model {} is not signed by NVIDIA; using FSR 3.1",
+                        Common::FS::PathToUTF8String(files.model));
+            return false;
+        }
         if (files.interposer.empty()) {
             LOG_WARNING(Render_Vulkan,
                         "NVIDIA DLSS is on, but sl.interposer.dll (NVIDIA Streamline) is not in "

@@ -27,6 +27,8 @@ set(SHADER_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/block_linear_unswizzle_3d.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/block_linear_unswizzle_3d_bcn.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/convert_abgr8_to_d24s8.frag
+    ${CMAKE_CURRENT_SOURCE_DIR}/convert_abgr8_to_x8d24.frag
+    ${CMAKE_CURRENT_SOURCE_DIR}/convert_x8d24_to_abgr8.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/convert_abgr8_to_d32f.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/convert_d32f_to_abgr8.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/convert_d24s8_to_abgr8.frag
@@ -162,6 +164,11 @@ foreach(SOURCE_FILE IN ITEMS ${SHADER_FILES})
     endif()
     # Skip compiling to SPIR-V OpenGL exclusive files
     if (NOT ${FILENAME} MATCHES "opengl.*")
+        set(SPIRV_DEPENDENCIES)
+        if (FILENAME STREQUAL "convert_abgr8_to_x8d24.frag" OR
+            FILENAME STREQUAL "convert_x8d24_to_abgr8.frag")
+            list(APPEND SPIRV_DEPENDENCIES ${CMAKE_CURRENT_SOURCE_DIR}/x8d24_conversion.glsl)
+        endif()
         string(TOUPPER ${SHADER_NAME}_SPV SPIRV_VARIABLE_NAME)
         set(SPIRV_HEADER_FILE ${SHADER_DIR}/${SHADER_NAME}_spv.h)
         add_custom_command(
@@ -171,6 +178,8 @@ foreach(SOURCE_FILE IN ITEMS ${SHADER_FILES})
                 ${GLSLANGVALIDATOR} -V ${QUIET_FLAG} -I"${FIDELITYFX_INCLUDE_DIR}" ${GLSL_FLAGS} --variable-name ${SPIRV_VARIABLE_NAME} -o ${SPIRV_HEADER_FILE} ${SOURCE_FILE} --target-env ${SPIR_V_VERSION}
             MAIN_DEPENDENCY
                 ${SOURCE_FILE}
+            DEPENDS
+                ${SPIRV_DEPENDENCIES}
         )
         set(SHADER_HEADERS ${SHADER_HEADERS} ${SPIRV_HEADER_FILE})
     endif()

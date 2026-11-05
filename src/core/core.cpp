@@ -23,7 +23,9 @@
 #include "core/core_timing.h"
 #include "core/cpu_manager.h"
 #include "core/debugger/debugger.h"
+#include "core/debugger/nx2_debug_tools.h"
 #include "core/device_memory.h"
+#include "core/file_sys/card_image.h"
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/fs_filesystem.h"
 #include "core/file_sys/nup_container.h"
@@ -139,6 +141,21 @@ bool IsSwitch2Program(const FileSys::VirtualFile& file, u64 program_id, std::siz
                metadata.IsSwitch2();
     }
     const auto type = file != nullptr ? Loader::IdentifyFile(file) : Loader::FileType::Unknown;
+    if (type == Loader::FileType::XCI || type == Loader::FileType::XCZ) {
+        const FileSys::XCI xci{file, program_id, program_index};
+        if (xci.GetStatus() != Loader::ResultStatus::Success) {
+            return false;
+        }
+        const auto partition = xci.GetSecurePartitionNSP();
+        const auto program = partition != nullptr
+                                 ? partition->GetNCA(xci.GetProgramTitleID(),
+                                                     FileSys::ContentRecordType::Program)
+                                 : nullptr;
+        const auto exefs = program != nullptr ? program->GetExeFS() : nullptr;
+        const auto npdm = exefs != nullptr ? exefs->GetFile("main.npdm") : nullptr;
+        return npdm != nullptr && metadata.Load(npdm) == Loader::ResultStatus::Success &&
+               metadata.IsSwitch2();
+    }
     if (type == Loader::FileType::NSP || type == Loader::FileType::NSZ) {
         const FileSys::NSP nsp{file, program_id, program_index};
         if (nsp.GetStatus() != Loader::ResultStatus::Success) {
@@ -173,7 +190,7 @@ struct System::Impl {
         device_memory.emplace();
 
         is_multicore = Settings::values.use_multi_core.GetValue();
-        extended_memory_layout = Settings::values.memory_layout_mode.GetValue() != Settings::MemoryLayout::Memory_4Gb;
+        memory_layout = Settings::values.memory_layout_mode.GetValue();
 
         core_timing.SetMulticore(is_multicore);
         core_timing.Initialize([&system]() { system.RegisterHostThread(); });
@@ -200,8 +217,7 @@ struct System::Impl {
         const bool must_reinitialize =
             !device_memory.has_value() ||
             is_multicore != Settings::values.use_multi_core.GetValue() ||
-            extended_memory_layout != (Settings::values.memory_layout_mode.GetValue() !=
-                                       Settings::MemoryLayout::Memory_4Gb);
+            memory_layout != Settings::values.memory_layout_mode.GetValue();
 
         if (!must_reinitialize) {
             return;
@@ -210,8 +226,7 @@ struct System::Impl {
         LOG_DEBUG(Kernel, "Re-initializing");
 
         is_multicore = Settings::values.use_multi_core.GetValue();
-        extended_memory_layout =
-            Settings::values.memory_layout_mode.GetValue() != Settings::MemoryLayout::Memory_4Gb;
+        memory_layout = Settings::values.memory_layout_mode.GetValue();
 
         Initialize(system);
     }
@@ -474,10 +489,12 @@ struct System::Impl {
             game_info.version = title_version;
             room_member->SendGameInfo(game_info);
         }
+        debug_service = Nx2Debug::MaybeStartService(system, name, params.program_id);
         return SystemResultStatus::Success;
     }
 
     void ShutdownMainProcess() {
+        debug_service.reset();
         SetShuttingDown(true);
         Common::ADPF::Shutdown();
 
@@ -603,10 +620,12 @@ struct System::Impl {
     std::atomic_bool is_shutting_down{};
     std::atomic_bool is_powered_on{};
     bool is_multicore : 1 = false;
-    bool extended_memory_layout : 1 = false;
+    Settings::MemoryLayout memory_layout{Settings::MemoryLayout::Memory_4Gb};
     bool exit_locked : 1 = false;
     bool exit_requested : 1 = false;
     bool nvdec_active : 1 = false;
+    /// EDEN_NX2_DEBUG_SERVER; the last member, so it stops before anything it reads goes away.
+    std::unique_ptr<Nx2Debug::Service> debug_service;
 
     void EnsureGeneralChannelInitialized(System& system) {
         if (!general_channel_event) {

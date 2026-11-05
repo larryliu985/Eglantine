@@ -11,6 +11,7 @@
 #include "qt_common/abstract/frontend.h"
 #include "qt_common/config/uisettings.h"
 #include "qt_common/qt_common.h"
+#include "video_core/pipeline_cache_files.h"
 
 #include <QDesktopServices>
 #include <QStandardPaths>
@@ -240,19 +241,20 @@ void RemoveAddOnContent(u64 program_id, InstalledEntryType type) {
 // Global Content //
 
 void RemoveTransferableShaderCache(u64 program_id, GameListRemoveTarget target) {
-    const auto target_file_name = [target] {
-        switch (target) {
-        case GameListRemoveTarget::GlShaderCache:
-            return "opengl.bin";
-        case GameListRemoveTarget::VkShaderCache:
-            return "vulkan.bin";
-        default:
-            return "";
-        }
-    }();
     const auto shader_cache_dir = Common::FS::GetEdenPath(Common::FS::EdenPath::ShaderDir);
     const auto shader_cache_folder_path = shader_cache_dir / fmt::format("{:016x}", program_id);
-    const auto target_file = shader_cache_folder_path / target_file_name;
+    const auto target_file = [&] {
+        switch (target) {
+        case GameListRemoveTarget::GlShaderCache:
+            return VideoCommon::VersionedPipelineCachePath(
+                shader_cache_folder_path, "opengl", VideoCommon::OpenGLPipelineCacheVersion);
+        case GameListRemoveTarget::VkShaderCache:
+            return VideoCommon::VersionedPipelineCachePath(
+                shader_cache_folder_path, "vulkan", VideoCommon::VulkanPipelineCacheVersion);
+        default:
+            return std::filesystem::path{};
+        }
+    }();
 
     if (!Common::FS::Exists(target_file)) {
         QtCommon::Frontend::Warning(tr("Error Removing Transferable Shader Cache"),
@@ -269,11 +271,10 @@ void RemoveTransferableShaderCache(u64 program_id, GameListRemoveTarget target) 
 }
 
 void RemoveVulkanDriverPipelineCache(u64 program_id) {
-    static constexpr std::string_view target_file_name = "vulkan_pipelines.bin";
-
     const auto shader_cache_dir = Common::FS::GetEdenPath(Common::FS::EdenPath::ShaderDir);
     const auto shader_cache_folder_path = shader_cache_dir / fmt::format("{:016x}", program_id);
-    const auto target_file = shader_cache_folder_path / target_file_name;
+    const auto target_file = VideoCommon::VersionedPipelineCachePath(
+        shader_cache_folder_path, "vulkan_pipelines", VideoCommon::VulkanPipelineCacheVersion);
 
     if (!Common::FS::Exists(target_file)) {
         return;

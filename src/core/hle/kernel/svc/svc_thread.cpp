@@ -12,9 +12,11 @@
 #include "core/core_timing.h"
 #include "core/hle/kernel/k_hardware_timer.h"
 #include "core/hle/kernel/k_process.h"
+#include "core/hle/kernel/k_scheduler.h"
 #include "core/hle/kernel/k_scoped_resource_reservation.h"
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/svc.h"
+#include "core/hle/kernel/thread_startup_policy.h"
 
 namespace Kernel::Svc {
 namespace {
@@ -109,6 +111,15 @@ Result StartThread(Core::System& system, Handle thread_handle) {
 
     // Try to start the thread.
     R_TRY(thread->Run(system.Kernel()));
+
+    if (GetCurrentProcess(system.Kernel()).GetProgramId() == MarioTennisFeverProgramId) {
+        KScopedSchedulerLock sl{system.Kernel()};
+        KThread& caller = GetCurrentThread(system.Kernel());
+        if (NeedsStartupGrace(MarioTennisFeverProgramId, caller.GetActiveCore(), caller.GetPriority(),
+                              thread->GetActiveCore(), thread->GetPriority())) {
+            caller.RecordStartupThread(system.Kernel(), thread.GetPointerUnsafe());
+        }
+    }
 
     // On hardware a started thread that can run begins within microseconds. An emulated core takes
     // longer (wake-up, JIT), so let the thread reach its first SVC before the caller carries on.

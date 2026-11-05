@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "common/dkb_cpu_trace.h"
 #include "common/fiber.h"
 #include "common/scope_exit.h"
 #include "common/thread.h"
@@ -93,7 +94,7 @@ void CpuManager::MultiCoreRunIdleThread(Kernel::KernelCore& kernel) {
     while (true) {
         auto& physical_core = kernel.CurrentPhysicalCore();
         if (!physical_core.IsInterrupted()) {
-            physical_core.Idle();
+            physical_core.Idle(kernel);
         }
         HandleInterrupt(kernel);
     }
@@ -169,6 +170,10 @@ void CpuManager::ShutdownThread(Kernel::KernelCore& kernel) {
 }
 
 void CpuManager::RunThread(std::stop_token token, std::size_t core) {
+    static_assert(Hardware::NUM_CPU_CORES == Common::DkbCpuTrace::GuestCoreCount);
+    const Common::DkbCpuTrace::Registration cpu_trace{
+        is_multicore ? static_cast<Common::DkbCpuTrace::Role>(core)
+                     : Common::DkbCpuTrace::Role::GuestSingleCore};
     /// Initialization
     system.RegisterCoreThread(core);
     std::string name = is_multicore ? ("CPUCore_" + std::to_string(core)) : std::string{"CPUThread"};

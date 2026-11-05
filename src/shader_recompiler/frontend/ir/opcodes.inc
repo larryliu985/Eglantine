@@ -366,6 +366,7 @@ OPCODE(GlobalAtomicAnd32,                                   U32,            U64,
 OPCODE(GlobalAtomicOr32,                                    U32,            U64,            U32,                                                            )
 OPCODE(GlobalAtomicXor32,                                   U32,            U64,            U32,                                                            )
 OPCODE(GlobalAtomicExchange32,                              U32,            U64,            U32,                                                            )
+OPCODE(GlobalAtomicCompareExchange32,                       U32,            U64,            U32,            U32,                                            )
 OPCODE(GlobalAtomicIAdd64,                                  U64,            U64,            U64,                                                            )
 OPCODE(GlobalAtomicSMin64,                                  U64,            U64,            U64,                                                            )
 OPCODE(GlobalAtomicUMin64,                                  U64,            U64,            U64,                                                            )
@@ -403,6 +404,7 @@ OPCODE(StorageAtomicAnd32,                                  U32,            U32,
 OPCODE(StorageAtomicOr32,                                   U32,            U32,            U32,            U32,                                            )
 OPCODE(StorageAtomicXor32,                                  U32,            U32,            U32,            U32,                                            )
 OPCODE(StorageAtomicExchange32,                             U32,            U32,            U32,            U32,                                            )
+OPCODE(StorageAtomicCompareExchange32,                      U32,            U32,            U32,            U32,            U32,                            )
 OPCODE(StorageAtomicIAdd64,                                 U64,            U32,            U32,            U64,                                            )
 OPCODE(StorageAtomicSMin64,                                 U64,            U32,            U32,            U64,                                            )
 OPCODE(StorageAtomicUMin64,                                 U64,            U32,            U32,            U64,                                            )
@@ -571,6 +573,9 @@ OPCODE(ImageAtomicAnd32,                                    U32,            Opaq
 OPCODE(ImageAtomicOr32,                                     U32,            Opaque,            Opaque,            U32,                                      )
 OPCODE(ImageAtomicXor32,                                    U32,            Opaque,            Opaque,            U32,                                      )
 OPCODE(ImageAtomicExchange32,                               U32,            Opaque,            Opaque,            U32,                                      )
+
+// Software matrix collective.
+OPCODE(TensorMulAdd, U32x2, U32x4, U32x2, U32x2, )
 
 // Warp operations
 OPCODE(LaneId,                                              U32,                                                                                            )

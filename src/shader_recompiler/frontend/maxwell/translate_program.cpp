@@ -475,6 +475,7 @@ IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Blo
 
     CollectInterpolationInfo(env, program);
     AddNVNStorageBuffers(program);
+    Optimization::LimitSampledTextureArrays(program, normalized_host_info);
     return program;
 }
 

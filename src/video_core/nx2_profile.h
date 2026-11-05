@@ -10,8 +10,10 @@
 #include <unordered_set>
 
 #include "common/common_types.h"
+#include "video_core/gpu_split.h"
 #include "common/logging.h"
 #include "common/cpu_features.h"
+#include "common/thread_cpu_clock.h"
 
 // EDEN_NX2_GPU_PROFILE: time where the GPU thread spends its time. Each zone counts its own
 // (exclusive) time, nested zones excluded; every 10 s the thread logs each zone's share.
@@ -51,6 +53,9 @@ enum class Zone : u32 {
     Method,       ///< Engine method calls (what a split GPU thread's back half would run)
     SplitDrain,   ///< Split GPU thread: the front waits for the back (gpu_split.h)
     SplitWait,    ///< Split GPU thread: the back waits for work
+    WriterWait,
+    ListSubmitWait,
+    ListGpuWait,
     Count,
 };
 
@@ -62,6 +67,7 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
     "descriptor acquire", "bind stage buffers", "push descriptors", "render targets",
     "configure draw", "dynamic state", "draw record", "texture upload", "fence",
     "fence skipped", "method", "split drain", "split wait",
+    "writer wait", "list submit wait", "list GPU wait",
 };
 
 // Read once at startup: Enabled() runs several times per method write (no guard to check).
@@ -81,8 +87,11 @@ struct ThreadData {
     std::array<u64, static_cast<size_t>(Zone::Count)> exclusive_ns{};
     std::array<u64, static_cast<size_t>(Zone::Count)> count{};
     std::array<u64, 8> counters{}; ///< See Counter
+    std::array<u64, static_cast<size_t>(DrainSite::Count)> drain_ns{};
+    std::array<u64, static_cast<size_t>(DrainSite::Count)> drain_count{};
     u64 child_ns{};    ///< Time of the zones nested in the current one
     u64 window_start{};
+    std::optional<u64> cpu_start_ns;
 };
 
 inline thread_local ThreadData t_data;
@@ -145,6 +154,15 @@ inline void Add(Counter counter, u64 amount) {
     }
 }
 
+/// The front waited for the back since `start` (Now) for `site`.
+inline void AddDrain(DrainSite site, u64 start) {
+    if (Enabled()) {
+        const auto index = static_cast<size_t>(site);
+        t_data.drain_ns[index] += Now() - start;
+        ++t_data.drain_count[index];
+    }
+}
+
 /// Called by the GPU thread (and the split's back thread) between commands: logs and resets
 /// the totals every 10 s.
 inline void Report(const char* thread_name = "GPU thread") {
@@ -155,6 +173,7 @@ inline void Report(const char* thread_name = "GPU thread") {
     const u64 now = Now();
     if (data.window_start == 0) {
         data.window_start = now;
+        data.cpu_start_ns = Common::CurrentThreadCpuTimeNs();
         data.child_ns = 0;
         return;
     }
@@ -162,6 +181,7 @@ inline void Report(const char* thread_name = "GPU thread") {
     if (window < 10'000'000'000ULL) {
         return;
     }
+    const auto cpu_now = Common::CurrentThreadCpuTimeNs();
     // Time in no zone at all is the wall time minus the zones' totals.
     u64 zoned{};
     for (size_t i = 1; i < data.exclusive_ns.size(); ++i) {
@@ -190,9 +210,30 @@ inline void Report(const char* thread_name = "GPU thread") {
     line += fmt::format(" | acquires {:.0f} ({:.0f} waited)",
                         static_cast<double>(data.counters[6]) * 1e9 / window,
                         static_cast<double>(data.counters[7]) * 1e9 / window);
+    std::string drains;
+    for (size_t i = 0; i < data.drain_count.size(); ++i) {
+        if (data.drain_count[i] != 0) {
+            drains += fmt::format(" {} {:.1f} ms ({:.0f}/s),", drain_site_names[i],
+                                  static_cast<double>(data.drain_ns[i]) * 1000.0 / window,
+                                  static_cast<double>(data.drain_count[i]) * 1e9 / window);
+        }
+    }
+    if (!drains.empty()) {
+        drains.pop_back();
+        line += " | waits for the back by site:" + drains;
+    }
+    if (cpu_now && data.cpu_start_ns && *cpu_now >= *data.cpu_start_ns) {
+        line += fmt::format(" | host_cpu_busy_ms_per_s={:.3f} window_wall_ms={:.3f}",
+                            static_cast<double>(*cpu_now - *data.cpu_start_ns) * 1000.0 / window,
+                            static_cast<double>(window) / 1e6);
+    } else {
+        line += fmt::format(" | host_cpu_busy_ms_per_s=unavailable window_wall_ms={:.3f}",
+                            static_cast<double>(window) / 1e6);
+    }
     LOG_INFO(HW_GPU, "{} per second:{}", thread_name, line);
     data = {};
     data.window_start = now;
+    data.cpu_start_ns = cpu_now;
 }
 
 } // namespace VideoCommon::Nx2Profile

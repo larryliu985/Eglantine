@@ -8,6 +8,7 @@
 #include <thread>
 
 #include "common/assert.h"
+#include "common/dkb_cpu_trace.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "common/thread.h"
@@ -48,6 +49,7 @@ ThreadManager::~ThreadManager() = default;
 void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Frontend::GraphicsContext& context, Tegra::Control::Scheduler& scheduler) {
     rasterizer = renderer.ReadRasterizer();
     thread = std::jthread([&](std::stop_token stop_token) {
+        const Common::DkbCpuTrace::Registration cpu_trace{Common::DkbCpuTrace::Role::GpuCommand};
         Common::SetCurrentThreadName("GPU");
         Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
         Common::SetCurrentThreadToPerformanceCores();
@@ -100,8 +102,9 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                     split.Defer([gpu = &system.GPU()] { gpu->TickWork(); });
                 } else if (auto* run = std::get_if<RunCommand>(&next.data)) {
                     if (run->before_later_reads) {
-                        split.Drain();
-                        run->func();
+                        // GPU memory maps unmap caches (UnmapMemory downloads): the back's state.
+                        split.DeferFunction(std::move(run->func));
+                        split.Drain(VideoCommon::DrainSite::Map);
                     } else {
                         split.DeferFunction(std::move(run->func));
                     }

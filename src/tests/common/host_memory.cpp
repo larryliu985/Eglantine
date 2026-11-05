@@ -6,6 +6,10 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+
 #include "common/host_memory.h"
 #include "common/literals.h"
 
@@ -16,6 +20,14 @@ static constexpr size_t VIRTUAL_SIZE = 1ULL << 39;
 static constexpr size_t BACKING_SIZE = 4_GiB;
 static constexpr auto PERMS = Common::MemoryPermission::ReadWrite;
 static constexpr auto HEAP = false;
+
+static bool MapsSingleGuestPages() {
+#ifdef _WIN32
+    return true;
+#else
+    return sysconf(_SC_PAGESIZE) == 0x1000;
+#endif
+}
 
 TEST_CASE("HostMemory: Initialize and deinitialize", "[common]") {
     {
@@ -29,6 +41,9 @@ TEST_CASE("HostMemory: Initialize and deinitialize", "[common]") {
 }
 
 TEST_CASE("HostMemory: Simple map", "[common]") {
+    if (!MapsSingleGuestPages()) {
+        SKIP("Host pages larger than 4 KiB only map whole host pages");
+    }
     HostMemory mem(BACKING_SIZE, VIRTUAL_SIZE);
     REQUIRE(mem.BackingBasePointer() != nullptr);
     mem.Map(0x5000, 0x8000, 0x1000, PERMS, HEAP);
@@ -38,7 +53,24 @@ TEST_CASE("HostMemory: Simple map", "[common]") {
     REQUIRE(data[0] == 50);
 }
 
+TEST_CASE("HostMemory: Aligned contiguous map", "[common]") {
+    HostMemory mem(BACKING_SIZE, VIRTUAL_SIZE);
+    REQUIRE(mem.BackingBasePointer() != nullptr);
+    mem.Map(0x40000, 0x80000, 0x10000, PERMS, HEAP);
+
+    volatile u8* const data = mem.VirtualBasePointer() + 0x40000;
+    data[0] = 1;
+    data[0x5fff] = 2;
+    data[0xffff] = 3;
+    REQUIRE(mem.BackingBasePointer()[0x80000] == 1);
+    REQUIRE(mem.BackingBasePointer()[0x85fff] == 2);
+    REQUIRE(mem.BackingBasePointer()[0x8ffff] == 3);
+}
+
 TEST_CASE("HostMemory: Simple mirror map", "[common]") {
+    if (!MapsSingleGuestPages()) {
+        SKIP("Host pages larger than 4 KiB only map whole host pages");
+    }
     HostMemory mem(BACKING_SIZE, VIRTUAL_SIZE);
     REQUIRE(mem.BackingBasePointer() != nullptr);
     mem.Map(0x5000, 0x3000, 0x2000, PERMS, HEAP);
@@ -51,6 +83,9 @@ TEST_CASE("HostMemory: Simple mirror map", "[common]") {
 }
 
 TEST_CASE("HostMemory: Simple unmap", "[common]") {
+    if (!MapsSingleGuestPages()) {
+        SKIP("Host pages larger than 4 KiB only map whole host pages");
+    }
     HostMemory mem(BACKING_SIZE, VIRTUAL_SIZE);
     REQUIRE(mem.BackingBasePointer() != nullptr);
     mem.Map(0x5000, 0x3000, 0x2000, PERMS, HEAP);
@@ -63,6 +98,9 @@ TEST_CASE("HostMemory: Simple unmap", "[common]") {
 }
 
 TEST_CASE("HostMemory: Simple unmap and remap", "[common]") {
+    if (!MapsSingleGuestPages()) {
+        SKIP("Host pages larger than 4 KiB only map whole host pages");
+    }
     HostMemory mem(BACKING_SIZE, VIRTUAL_SIZE);
     REQUIRE(mem.BackingBasePointer() != nullptr);
     mem.Map(0x5000, 0x3000, 0x2000, PERMS, HEAP);
@@ -152,6 +190,9 @@ TEST_CASE("HostMemory: Unmap to right", "[common]") {
 }
 
 TEST_CASE("HostMemory: Partial right unmap check bindings", "[common]") {
+    if (!MapsSingleGuestPages()) {
+        SKIP("Host pages larger than 4 KiB only map whole host pages");
+    }
     HostMemory mem(BACKING_SIZE, VIRTUAL_SIZE);
     REQUIRE(mem.BackingBasePointer() != nullptr);
     mem.Map(0x4000, 0x10000, 0x4000, PERMS, HEAP);
@@ -165,6 +206,9 @@ TEST_CASE("HostMemory: Partial right unmap check bindings", "[common]") {
 }
 
 TEST_CASE("HostMemory: Partial left unmap check bindings", "[common]") {
+    if (!MapsSingleGuestPages()) {
+        SKIP("Host pages larger than 4 KiB only map whole host pages");
+    }
     HostMemory mem(BACKING_SIZE, VIRTUAL_SIZE);
     REQUIRE(mem.BackingBasePointer() != nullptr);
     mem.Map(0x4000, 0x10000, 0x4000, PERMS, HEAP);
@@ -195,6 +239,9 @@ TEST_CASE("HostMemory: Partial middle unmap check bindings", "[common]") {
 }
 
 TEST_CASE("HostMemory: Partial sparse middle unmap and check bindings", "[common]") {
+    if (!MapsSingleGuestPages()) {
+        SKIP("Host pages larger than 4 KiB only map whole host pages");
+    }
     HostMemory mem(BACKING_SIZE, VIRTUAL_SIZE);
     REQUIRE(mem.BackingBasePointer() != nullptr);
     mem.Map(0x4000, 0x10000, 0x2000, PERMS, HEAP);

@@ -145,23 +145,32 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "Higher resolutions require more VRAM and bandwidth.\n"
               "Options lower than 1X can cause artifacts."));
     INSERT(Settings, scaling_filter, tr("Window Adapting Filter:"), QString());
+    INSERT(Settings, game_dlss_network, tr("Use the game's own DLSS"),
+           tr("Runs a Switch 2 game's own DLSS (its upscaling network, translated for this GPU) "
+              "instead of AMD FSR 3.1 in its place.\nAMD FSR 3.1 still draws while the network is "
+              "checked, when it can't run on this GPU, with resolution scaling, and for the rest "
+              "of the session if its output fails Lichii's checks.\nTakes effect when a game "
+              "starts."));
     INSERT(Settings, fsr_sharpening_slider, tr("RCAS Sharpness:"),
            tr("Strength of RCAS (AMD's contrast-adaptive sharpening) on the upscaler used in place "
               "of a game's DLSS (AMD FSR 3.1); 0% turns it off.\nAlso sets the sharpening "
               "of the AMD FSR 1 and SGSR window adapting filters."));
 #ifdef _WIN32
-    INSERT(Settings, nvidia_dlss, tr("Use NVIDIA DLSS in place of a game's DLSS"),
+    INSERT(Settings, nvidia_dlss, tr("Use NVIDIA DLSS in place of a game's DLSS (experimental)"),
            tr("Uses NVIDIA DLSS on GeForce RTX cards in place of a Switch 2 game's own DLSS, "
               "instead of AMD FSR 3.1.\nNeeds NVIDIA's Streamline loader, and NVIDIA DLSS unless "
               "the NVIDIA app has downloaded it; Eglantine does not ship NVIDIA's files. Use the "
-              "download button below.\nTakes effect when a game starts."));
+              "download button below." "\nCurrently requires Fire Emblem: Fortune's Weave and EDEN_NX2_DLSS_REPLACEMENT=dlss. "
+              "Without that override, its spatial workaround remains active."
+              "\nTakes effect when a game starts."));
 #else
-    INSERT(Settings, nvidia_dlss, tr("Use NVIDIA DLSS in place of a game's DLSS"),
+    INSERT(Settings, nvidia_dlss, tr("Use NVIDIA DLSS in place of a game's DLSS (experimental)"),
            tr("Uses NVIDIA DLSS on NVIDIA RTX GPUs in place of a Switch 2 game's own DLSS, "
               "instead of AMD FSR 3.1.\nNeeds NVIDIA's driver and the DLSS library "
               "(libnvidia-ngx-dlss.so.<version>, from NVIDIA's DLSS SDK) in the ngx folder of the "
-              "user directory; Eglantine does not ship NVIDIA's files.\nTakes effect when a game "
-              "starts."));
+              "user directory; Eglantine does not ship NVIDIA's files." "\nCurrently requires Fire Emblem: Fortune's Weave and EDEN_NX2_DLSS_REPLACEMENT=dlss. "
+              "Without that override, its spatial workaround remains active."
+              "\nTakes effect when a game starts."));
 #endif
     INSERT(Settings, anti_aliasing, tr("Anti-Aliasing Method:"),
            tr("The anti-aliasing method to use.\nSMAA offers the best quality.\nFXAA "

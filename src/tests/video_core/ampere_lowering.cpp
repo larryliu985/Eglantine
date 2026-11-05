@@ -81,14 +81,21 @@ TEST_CASE("Ampere I2F converts signed 16-bit sources", "[video_core][ampere]") {
 }
 
 TEST_CASE("Ampere integer-to-float conversions take immediates", "[video_core][ampere]") {
-    // I2F.U32.RP R7, 0x20; I2FP.F32.U32.RZ R4, 0x100; WARPSYNC R7
-    const std::array<Instruction, 4> code{{
+    const std::array<Instruction, 3> code{{
         {{0x00077906, 0x00000020, 0x00209000, 0x000e2200}},
         {{0x00047845, 0x00000100, 0x0020d000, 0x000fe200}},
-        {{0x00007348, 0x00000007, 0x03800000, 0x000fe800}},
         EXIT,
     }};
-    REQUIRE(static_cast<bool>(LowerToMaxwell(code)));
+    const auto lowered = LowerToMaxwell(code);
+    REQUIRE(lowered);
+    REQUIRE(lowered.instructions.size() == 3);
+    CHECK(lowered.instructions[0] == 0x010420000007f007ULL);
+    CHECK(lowered.instructions[1] == 0x010438000007f004ULL);
+    const Instruction warp_sync{{0x00007348, 0x00000007, 0x03800000, 0x000fe800}};
+    const auto rejected = LowerToMaxwell(std::array{code[0], code[1], warp_sync, EXIT});
+    REQUIRE_FALSE(rejected);
+    CHECK(rejected.error == "unsupported native opcode");
+    CHECK(rejected.error_offset == 0x20);
 }
 
 TEST_CASE("Ampere SUST.P keeps its channel mask", "[video_core][ampere]") {
@@ -146,5 +153,102 @@ TEST_CASE("Ampere programs go on past an EXIT that a branch jumps over", "[video
     const auto lowered = LowerToMaxwell(code);
     REQUIRE(static_cast<bool>(lowered));
     REQUIRE(lowered.source_size == sizeof(code));
+}
+
+TEST_CASE("Ampere capture ends at the return of a helper called past the EXIT",
+          "[video_core][ampere]") {
+    // Ocarina 69a40579971fb867: MOV R0, 0x20; CALL.REL.NOINC; EXIT; RET.REL.NODEC R0, then the
+    // next program in memory.
+    const std::array<Instruction, 4> code{{
+        {{0x00007802, 0x20, 0x00000f00, 0}},
+        {{0x00007944, 0x10, 0x03c00000, 0}},
+        EXIT,
+        {{0x00007950, 0xffffffc0, 0x03c3ffff, 0}},
+    }};
+    ProgramCaptureState capture;
+    for (u32 index = 0; index + 1 < code.size(); ++index)
+        CHECK(capture.Observe(code[index], index) == ProgramCaptureState::Result::Continue);
+    CHECK(capture.Observe(code.back(), 3) == ProgramCaptureState::Result::Complete);
+    REQUIRE(static_cast<bool>(LowerToMaxwell(code)));
+
+    ProgramCaptureState jump;
+    CHECK(jump.Observe({{0x00007944, 0x10, 0x03c00000, 0}}, 0) == ProgramCaptureState::Result::Continue);
+    CHECK(jump.Observe(EXIT, 1) == ProgramCaptureState::Result::Continue);
+    CHECK(jump.Observe(EXIT, 2) == ProgramCaptureState::Result::Complete);
+}
+
+TEST_CASE("Ampere uniform select and bit operations reach every uniform register",
+          "[video_core][ampere]") {
+    // Ocarina e8decc3e5c0c184e: @UP0 USEL UR4, UR4, 0x20, UP1. UP0 and UP1 come from R239 into
+    // P6 and P5; the SEL runs under P6 and the guest predicates are restored.
+    const std::array<Instruction, 2> select{{
+        {{0x04040887, 0x20, 0x08800000, 0x000fe200}},
+        EXIT,
+    }};
+    const auto selected = LowerToMaxwell(select);
+    INFO(selected.error);
+    REQUIRE(static_cast<bool>(selected));
+    const std::array<u64, 5> expected_select{
+        0x010000000207f0fcULL, 0x38e800000607fffdULL, 0x38f000000607ef00ULL,
+        0x5ca002800fc6dcdcULL, 0x38f000000607fd00ULL};
+    CHECK(std::search(selected.instructions.begin(), selected.instructions.end(),
+                      expected_select.begin(), expected_select.end()) != selected.instructions.end());
+
+    // Ocarina 2079791ecb288b83: UBREV UR4, UR17.
+    const std::array<Instruction, 2> reverse{{
+        {{0x000472be, 0x11, 0x08000000, 0x000fc800}},
+        EXIT,
+    }};
+    const auto reversed = LowerToMaxwell(reverse);
+    INFO(reversed.error);
+    REQUIRE(static_cast<bool>(reversed));
+    CHECK(reversed.instructions.front() == 0x382801800007e9dcULL);
+
+    // Ocarina 2079791ecb288b83: UFLO.U32.SH UR21, UR21.
+    const std::array<Instruction, 2> leading{{
+        {{0x001572bd, 0x15, 0x080e0400, 0x000fe400}},
+        EXIT,
+    }};
+    const auto found = LowerToMaxwell(leading);
+    INFO(found.error);
+    REQUIRE(static_cast<bool>(found));
+    CHECK(found.instructions.front() == 0x5c3002000ed700edULL);
+
+    // Ocarina 2079791ecb288b83: UPOPC UR10, UR17.
+    const std::array<Instruction, 2> count{{
+        {{0x000a72bf, 0x11, 0x08000000, 0x000fe200}},
+        EXIT,
+    }};
+    const auto counted = LowerToMaxwell(count);
+    INFO(counted.error);
+    REQUIRE(static_cast<bool>(counted));
+    CHECK(counted.instructions.front() == 0x5c0800000e9700e2ULL);
+}
+
+TEST_CASE("Ampere guarded uniform comparisons keep the output when the guard is false",
+          "[video_core][ampere]") {
+    // Ocarina 2079791ecb288b83: @UP4 UISETP.GT.U32.AND UP0, UPT, UR21, 0x1f, UPT. UP4 and the old
+    // UP0 load into P2 and P6, so a false guard merges UP0 back unchanged.
+    const std::array<Instruction, 2> code{{
+        {{0x1500488c, 0x1f, 0x0bf04070, 0x000fe200}},
+        EXIT,
+    }};
+    const auto lowered = LowerToMaxwell(code);
+    INFO(lowered.error);
+    REQUIRE(static_cast<bool>(lowered));
+    const std::array<u64, 6> expected{
+        0x0100000001f7f0fcULL, 0x38e800000447fffdULL, 0x38f000000447ef00ULL,
+        0x5b6803800fc2ed37ULL, 0x38e800000407efefULL, 0x38f000000447fd00ULL};
+    CHECK(std::equal(expected.begin(), expected.end(), lowered.instructions.begin()));
+
+    // SEL R3, R4, UR7, P0
+    const std::array<Instruction, 2> select{{
+        {{0x04037c07, 0x7, 0x08000000, 0x000fe400}},
+        EXIT,
+    }};
+    const auto selected = LowerToMaxwell(select);
+    INFO(selected.error);
+    REQUIRE(static_cast<bool>(selected));
+    CHECK(selected.instructions.front() == 0x5ca000000df70403ULL);
 }
 } // namespace

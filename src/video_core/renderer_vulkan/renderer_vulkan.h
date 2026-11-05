@@ -63,6 +63,10 @@ public:
     void InitializePlatformSpecific();
 
 private:
+    Common::DkbFrameTrace::RateLimit trace_cpu_rate;
+    std::chrono::steady_clock::time_point trace_last_frame{};
+    u64 trace_frame{};
+
     void InterpolateFrames(Frame* prev_frame, Frame* curr_frame);
     Frame* previous_frame = nullptr;  // Store the previous frame for interpolation
     VkCommandBuffer BeginSingleTimeCommands();

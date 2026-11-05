@@ -41,6 +41,7 @@ public:
     void ApplyConfiguration();
 
     void LoadFromFile(FileSys::VirtualFile file_);
+    void SetFile(FileSys::VirtualFile file_);
 
     void SetTitleId(u64 id);
 

@@ -13,6 +13,7 @@
 #include "core/arm/dynarmic/arm_dynarmic.h"
 #include "core/arm/dynarmic/arm_dynarmic_64.h"
 #include "core/arm/dynarmic/dynarmic_exclusive_monitor.h"
+#include "core/arm/dynarmic/window_trace.h"
 #include "core/core_timing.h"
 #include "core/hle/kernel/k_process.h"
 #include "dynarmic/interface/A64/config.h"
@@ -61,7 +62,16 @@ std::optional<u32> DynarmicCallbacks64::MemoryReadCode(u64 vaddr) {
         m_memory.ReadBlock(aligned_vaddr, &cached_code_page, sizeof(cached_code_page));
         last_code_addr = aligned_vaddr;
     }
-    return cached_code_page.inst[(vaddr & Core::Memory::YUZU_PAGEMASK) / sizeof(u32)];
+    const u32 instruction = cached_code_page.inst[(vaddr & Core::Memory::YUZU_PAGEMASK) / sizeof(u32)];
+    if (WindowTrace::Enabled() && m_process->GetProgramId() == WindowTrace::ProgramId) {
+        if (!m_window_trace) {
+            m_window_trace = WindowTrace::sessions.Find(m_process);
+        }
+        if (m_window_trace) {
+            return WindowTrace::InstructionFor(m_window_trace->base, vaddr, instruction);
+        }
+    }
+    return instruction;
 }
 
 void DynarmicCallbacks64::MemoryWrite(Dynarmic::A64::VAddr vaddr, u64 value, std::size_t size) {
@@ -124,6 +134,70 @@ void DynarmicCallbacks64::InstructionCacheOperationRaised(Dynarmic::A64::Instruc
 }
 
 void DynarmicCallbacks64::ExceptionRaised(u64 pc, Dynarmic::A64::Exception exception) {
+    if (m_window_trace && exception == Dynarmic::A64::Exception::Breakpoint) {
+        const auto point = WindowTrace::Identify(m_window_trace->base, pc, m_memory.Read32(pc));
+        if (point != WindowTrace::Point::None) {
+            auto& jit = *m_parent.m_jit;
+            const u64 x0 = jit.GetRegister(0);
+            const u64 x1 = jit.GetRegister(1);
+            u64 native = 0;
+            if (point == WindowTrace::Point::WindowInitialize) {
+                native = m_memory.Read64(x1 + 0x18);
+            } else if (point == WindowTrace::Point::NativeInitialize ||
+                       point == WindowTrace::Point::Acquire ||
+                       point == WindowTrace::Point::Finalize) {
+                native = m_memory.Read64(x0);
+            }
+            const auto identity = m_window_trace->Record(
+                point, m_tpidrro_el0, point == WindowTrace::Point::WindowInitialize ? x0 : 0, native);
+            if (!identity) {
+                WindowTrace::Resume(point, jit, m_memory);
+                return;
+            }
+            u32 registrations = 0;
+            if (identity->native != 0) {
+                for (u32 i = 0; i < 8; ++i) {
+                    const u64 entry = m_window_trace->base + 0xF633F8 + i * 0x128;
+                    registrations += m_memory.Read64(entry) == identity->native;
+                }
+            }
+            LOG_INFO(Core_ARM, "Star Fox window trace session={} {} pc={:#x} lr={:#x} tls={:#x} window={:#x} native={:#x} registrations={} x0={:#x}",
+                     m_window_trace->id, WindowTrace::Name(point), pc, jit.GetRegister(30),
+                     m_tpidrro_el0, identity->window, identity->native, registrations, x0);
+            if (point == WindowTrace::Point::NativeInitialize) {
+                const u32 count = static_cast<u32>(jit.GetRegister(2));
+                LOG_INFO(Core_ARM, "Star Fox window textures session={} tls={:#x} native={:#x} count={}",
+                         m_window_trace->id, m_tpidrro_el0, identity->native, count);
+                for (u32 i = 0; i < std::min(count, 4U); ++i) {
+                    const u64 texture = x1 + i * 0x28;
+                    LOG_INFO(Core_ARM, "Star Fox window texture session={} tls={:#x} native={:#x} index={} {}x{} format={} block_format={} pitch_gobs={} block_height={} fd={} pool_size={:#x} offset={:#x}",
+                             m_window_trace->id, m_tpidrro_el0, identity->native,
+                             i, m_memory.Read32(texture + 8), m_memory.Read32(texture + 12),
+                             m_memory.Read8(texture + 16), m_memory.Read8(texture + 17),
+                             m_memory.Read32(texture + 20), m_memory.Read32(texture + 24),
+                             m_memory.Read32(texture + 28), m_memory.Read32(texture + 32),
+                             m_memory.Read32(texture + 36));
+                }
+            } else if (point == WindowTrace::Point::ValidateTexture) {
+                const u64 texture = jit.GetRegister(25);
+                LOG_INFO(Core_ARM, "Star Fox window validation session={} tls={:#x} native={:#x} required_size={:#x} alignment={:#x} pool_size={:#x} offset={:#x}",
+                         m_window_trace->id, m_tpidrro_el0, identity->native,
+                         m_memory.Read64(jit.GetSP() + 0x10), m_memory.Read32(jit.GetSP() + 0x18),
+                         m_memory.Read32(texture + 12), m_memory.Read32(texture + 16));
+            } else if (point == WindowTrace::Point::Acquire || point == WindowTrace::Point::Finalize) {
+                if (point == WindowTrace::Point::Acquire && registrations == 0) {
+                    for (u32 i = 0; i < 8; ++i) {
+                        const u64 entry = m_window_trace->base + 0xF633F8 + i * 0x128;
+                        LOG_INFO(Core_ARM, "Star Fox window slot session={} tls={:#x} requested={:#x} slot={} native={:#x} active={}",
+                                 m_window_trace->id, m_tpidrro_el0, identity->native, i,
+                                 m_memory.Read64(entry), m_memory.Read8(entry + 0x120));
+                    }
+                }
+            }
+            WindowTrace::Resume(point, jit, m_memory);
+            return;
+        }
+    }
     switch (exception) {
     case Dynarmic::A64::Exception::WaitForInterrupt:
     case Dynarmic::A64::Exception::WaitForEvent:

@@ -613,24 +613,28 @@ void EmitImageGradient(EmitContext& ctx, IR::Inst& inst, const IR::Value& index,
 }
 
 void EmitImageRead(EmitContext& ctx, IR::Inst& inst, const IR::Value& index, Register coord) {
-    const auto info{inst.Flags<IR::TextureInstInfo>()};
+    auto info{inst.Flags<IR::TextureInstInfo>()};
+    info.is_depth.Assign(0);
     const auto sparse_inst{PrepareSparse(inst)};
     const std::string_view format{FormatStorage(info.image_format)};
     const std::string_view sparse_mod{sparse_inst ? ".SPARSE" : ""};
     const std::string_view type{TextureType(info)};
     const std::string image{Image(ctx, info, index)};
     const Register ret{ctx.reg_alloc.Define(inst)};
-    ctx.Add("LOADIM.{}{} {},{},{},{};", format, sparse_mod, ret, coord, image, type);
+    const std::string_view coherent{ctx.info.requires_coherent_image_memory ? ".COH" : ""};
+    ctx.Add("LOADIM{}.{}{} {},{},{},{};", coherent, format, sparse_mod, ret, coord, image, type);
     StoreSparse(ctx, sparse_inst);
 }
 
 void EmitImageWrite(EmitContext& ctx, IR::Inst& inst, const IR::Value& index, Register coord,
                     Register color) {
-    const auto info{inst.Flags<IR::TextureInstInfo>()};
+    auto info{inst.Flags<IR::TextureInstInfo>()};
+    info.is_depth.Assign(0);
     const std::string_view format{FormatStorage(info.image_format)};
     const std::string_view type{TextureType(info)};
     const std::string image{Image(ctx, info, index)};
-    ctx.Add("STOREIM.{} {},{},{},{};", format, image, color, coord, type);
+    const std::string_view coherent{ctx.info.requires_coherent_image_memory ? ".COH" : ""};
+    ctx.Add("STOREIM{}.{} {},{},{},{};", coherent, format, image, color, coord, type);
 }
 
 void EmitIsTextureScaled(EmitContext& ctx, IR::Inst& inst, const IR::Value& index) {

@@ -8,6 +8,7 @@
 #include <string_view>
 
 #include "common/logging.h"
+#include "video_core/dlss_evaluation.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_streamline_dlss.h"
 #include "video_core/vulkan_common/streamline.h"
@@ -294,28 +295,7 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
                 VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0,
                 barrier(VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT));
         };
-        if (options_changed) {
-            const auto set = reinterpret_cast<PFun_slDLSSSetOptions*>(set_options);
-            if (const sl::Result result = set(viewport, options); result != sl::Result::eOk) {
-                if (!failed.exchange(true)) {
-                    LOG_ERROR(Render_Vulkan,
-                              "Streamline rejected the DLSS options (result {}); using FSR 3.1",
-                              static_cast<int>(result));
-                }
-                clear_output();
-                return;
-            }
-        }
         sl::FrameToken* frame{};
-        if (const sl::Result result = api.get_new_frame_token(frame, &index);
-            result != sl::Result::eOk || !frame) {
-            if (!failed.exchange(true)) {
-                LOG_ERROR(Render_Vulkan, "Streamline gave no frame token (result {}); using FSR 3.1",
-                          static_cast<int>(result));
-            }
-            clear_output();
-            return;
-        }
 
         constexpr VkAccessFlags WRITES =
             VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
@@ -330,8 +310,6 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
             Barrier(in.motion_vectors, WRITES, VK_ACCESS_SHADER_READ_BIT,
                     VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
         };
-        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, {}, {}, to_read);
 
         // DLSS super resolution only reads the jitter, motion and depth conventions; the camera
         // fields are for frame generation, which this doesn't use.
@@ -360,7 +338,6 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
         constants.motionVectors3D = sl::eFalse;
         constants.reset = reset ? sl::eTrue : sl::eFalse;
         constants.motionVectorsJittered = sl::eFalse;
-        api.set_constants(constants, *frame, viewport);
 
         sl::Resource color = Resource(in.color.image, in.color.view, in.color.format,
                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, in.render_size,
@@ -387,21 +364,12 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
                                    sl::ResourceLifecycle::eValidUntilEvaluate, &output_area};
         const sl::BaseStructure* inputs[] = {&viewport, &color_tag, &depth_tag, &motion_tag,
                                              &output_tag};
-        const sl::Result result =
-            api.evaluate_feature(sl::kFeatureDLSS, *frame, inputs, std::size(inputs),
-                                 reinterpret_cast<sl::CommandBuffer*>(*cmdbuf));
-        if (result != sl::Result::eOk && !failed.exchange(true)) {
-            LOG_ERROR(Render_Vulkan, "NVIDIA DLSS evaluation failed (Streamline result {}); "
-                                     "using FSR 3.1 from now on",
-                      static_cast<int>(result));
-        }
-
         const std::array to_general{
-            Barrier(in.color, VK_ACCESS_SHADER_READ_BIT, 0,
+            Barrier(in.color, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_SHADER_READ_BIT | WRITES,
                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL),
-            Barrier(in.depth, VK_ACCESS_SHADER_READ_BIT, 0,
+            Barrier(in.depth, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_SHADER_READ_BIT | WRITES,
                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL),
-            Barrier(in.motion_vectors, VK_ACCESS_SHADER_READ_BIT, 0,
+            Barrier(in.motion_vectors, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_SHADER_READ_BIT | WRITES,
                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL),
         };
         const VkMemoryBarrier output_written{
@@ -410,10 +378,44 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
             .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
             .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
         };
-        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                               VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, output_written, {},
-                               to_general);
-        if (result != sl::Result::eOk) {
+        sl::Result api_result = sl::Result::eOk;
+        const auto result = VideoCommon::RecordDlssEvaluation(
+            [&] {
+                if (!options_changed) {
+                    return true;
+                }
+                const auto set = reinterpret_cast<PFun_slDLSSSetOptions*>(set_options);
+                api_result = set(viewport, options);
+                return api_result == sl::Result::eOk;
+            },
+            [&] {
+                api_result = api.get_new_frame_token(frame, &index);
+                return api_result == sl::Result::eOk && frame;
+            },
+            [&] {
+                cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, {}, {}, to_read);
+            },
+            [&] {
+                api_result = api.set_constants(constants, *frame, viewport);
+                return api_result == sl::Result::eOk;
+            },
+            [&] {
+                api_result = api.evaluate_feature(sl::kFeatureDLSS, *frame, inputs, std::size(inputs),
+                                                  reinterpret_cast<sl::CommandBuffer*>(*cmdbuf));
+                return api_result == sl::Result::eOk;
+            },
+            [&] {
+                cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                       VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, output_written, {},
+                                       to_general);
+            });
+        if (result != VideoCommon::DlssEvaluationResult::Succeeded && !failed.exchange(true)) {
+            LOG_ERROR(Render_Vulkan,
+                      "NVIDIA DLSS recording failed at stage {} (Streamline result {}); using FSR 3.1",
+                      static_cast<int>(result), static_cast<int>(api_result));
+        }
+        if (result != VideoCommon::DlssEvaluationResult::Succeeded) {
             clear_output();
         }
     });

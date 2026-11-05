@@ -403,6 +403,10 @@ std::vector<const char*> ExtensionListForVulkan(
     return output;
 }
 
+constexpr u32 NvidiaDriverVersion(u32 major, u32 minor, u32 secondary) {
+    return (major << 22) | (minor << 14) | (secondary << 6);
+}
+
 constexpr std::array<char, 8> STATIC_CACHE_MAGIC_NUMBER{'e', 'd', 'e', 'n', 's', 't', 'p', 'c'};
 constexpr u32 STATIC_CACHE_VERSION = 1;
 
@@ -1391,7 +1395,7 @@ bool Device::GetSuitability(bool requires_swapchain) {
     if (extensions.vertex_input_dynamic_state) {
         const u32 version = (properties.properties.driverVersion << 3) >> 3;
         if ((driver_id == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS && version < VK_MAKE_API_VERSION(27, 20, 100, 0))
-        || (driver_id == VK_DRIVER_ID_NVIDIA_PROPRIETARY && version < VK_MAKE_API_VERSION(580, 119, 02, 0))) {
+        || (driver_id == VK_DRIVER_ID_NVIDIA_PROPRIETARY && properties.properties.driverVersion < NvidiaDriverVersion(580, 119, 2))) {
             LOG_WARNING(Render_Vulkan, "Disabling broken VK_EXT_vertex_input_dynamic_state");
             RemoveExtensionFeature(extensions.vertex_input_dynamic_state, features.vertex_input_dynamic_state, VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
         }
@@ -1602,7 +1606,15 @@ void Device::RemoveUnsuitableExtensions() {
                                        VK_EXT_MESH_SHADER_EXTENSION_NAME);
 
     // VK_KHR_shader_quad_control
-    extensions.shader_quad_control = features.shader_quad_control.shaderQuadControl;
+    // Quad control depends on maximal reconvergence; advertise neither unless
+    // the dependency is enabled on the logical device too.
+    extensions.shader_maximal_reconvergence =
+        features.shader_maximal_reconvergence.shaderMaximalReconvergence;
+    RemoveExtensionFeatureIfUnsuitable(extensions.shader_maximal_reconvergence,
+                                       features.shader_maximal_reconvergence,
+                                       VK_KHR_SHADER_MAXIMAL_RECONVERGENCE_EXTENSION_NAME);
+    extensions.shader_quad_control = features.shader_quad_control.shaderQuadControl &&
+                                     extensions.shader_maximal_reconvergence;
     RemoveExtensionFeatureIfUnsuitable(extensions.shader_quad_control, features.shader_quad_control,
                                        VK_KHR_SHADER_QUAD_CONTROL_EXTENSION_NAME);
 
@@ -1763,7 +1775,7 @@ u64 Device::GetDeviceMemoryBudget() const {
             result += AllocatedUsage(budget.heapUsage[heap], heap_budgets[heap]);
         }
     }
-    if (is_integrated) {
+    if (is_integrated && !IsMoltenVK()) {
         // An integrated GPU's device-local heap is system memory (a Radeon 780M reported a 21 GB
         // budget): following it let the texture cache fill that much RAM before collecting, and
         // kept ASTC uncompressed. Its budget is at most the share CollectPhysicalMemoryInfo

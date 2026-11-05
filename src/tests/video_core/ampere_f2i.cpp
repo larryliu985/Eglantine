@@ -33,28 +33,23 @@ TEST_CASE("Ampere F2I round up preserves conversion mode", "[video_core][ampere]
     REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(std::array{unsupported, exit})));
 }
 
-TEST_CASE("Ampere F2I signed byte clamps after conversion", "[video_core][ampere]") {
+TEST_CASE("Ampere F2I signed byte retains signed truncation and FTZ", "[video_core][ampere]") {
     using Shader::Ampere::Instruction;
     using Shader::Ampere::LowerToMaxwell;
     const Instruction convert{{0x00097305, 0x00000005, 0x0021e100, 0}};
     const Instruction exit{{0x0000794d, 0, 0x03800000, 0}};
     const auto lowered = LowerToMaxwell(std::array{convert, exit});
     REQUIRE(static_cast<bool>(lowered));
-    REQUIRE(lowered.instructions.size() == 3);
-
-    const u64 f2i = lowered.instructions[0];
+    const auto conversion = std::ranges::find_if(lowered.instructions, [](u64 word) {
+        return (word >> 48) == 0x5cb0;
+    });
+    REQUIRE(conversion != lowered.instructions.end());
+    const u64 f2i = *conversion;
     REQUIRE((f2i & 0xff) == 9);
-    REQUIRE(((f2i >> 8) & 3) == 1);
+    REQUIRE(((f2i >> 8) & 3) == 2);
     REQUIRE(((f2i >> 10) & 3) == 2);
     REQUIRE(((f2i >> 12) & 1) == 1);
     REQUIRE(((f2i >> 39) & 3) == 3);
     REQUIRE(((f2i >> 44) & 1) == 1);
 
-    const u64 i2i = lowered.instructions[1];
-    REQUIRE((i2i & 0xff) == 9);
-    REQUIRE(((i2i >> 8) & 3) == 0);
-    REQUIRE(((i2i >> 10) & 3) == 1);
-    REQUIRE(((i2i >> 12) & 3) == 3);
-    REQUIRE(((i2i >> 20) & 0xff) == 9);
-    REQUIRE(((i2i >> 50) & 1) == 1);
 }

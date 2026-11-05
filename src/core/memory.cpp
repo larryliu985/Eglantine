@@ -170,6 +170,24 @@ struct Memory::Impl {
         }
     }
 
+    bool Read32Acquire(const Common::ProcessAddress addr, u32& value) {
+        value = 0;
+        if (!current_page_table || (addr & 3) != 0) {
+            return false;
+        }
+        auto* pointer = GetPointerImpl(GetInteger(addr), [] {}, [&] {
+            HandleRasterizerDownload(GetInteger(addr), sizeof(u32));
+        });
+        if (!pointer) {
+            return false;
+        }
+        u32_le actual{};
+        static_cast<void>(Common::AtomicCompareAndSwap(reinterpret_cast<u32_le*>(pointer),
+                                                     u32_le{0}, u32_le{0}, actual));
+        value = actual;
+        return true;
+    }
+
     u64 Read64(const Common::ProcessAddress addr) {
         if ((addr & 7) == 0) {
             return Read<u64_le>(addr);
@@ -599,17 +617,27 @@ struct Memory::Impl {
         for (u64 page = vaddr >> YUZU_PAGEBITS; page != page_end; ++page) {
             const bool cached = std::as_const(current_page_table->entries)[page].Type() ==
                                 Common::PageType::RasterizerCachedMemory;
+            armed_read_trap_count.fetch_add(1, std::memory_order_relaxed);
             if (!cached || !armed_read_traps.insert(page).second) {
+                armed_read_trap_count.fetch_sub(1, std::memory_order_relaxed);
                 protect_run();
                 continue;
             }
-            armed_read_trap_count.fetch_add(1, std::memory_order_relaxed);
             if (run_pages == 0) {
                 run_begin = page;
             }
             ++run_pages;
         }
         protect_run();
+    }
+
+    bool ReadTrapArmed(u64 vaddr, u64 size) {
+        if (armed_read_trap_count.load(std::memory_order_relaxed) == 0) {
+            return false;
+        }
+        std::scoped_lock lk{read_trap_mutex};
+        const auto it = armed_read_traps.lower_bound(vaddr >> YUZU_PAGEBITS);
+        return it != armed_read_traps.end() && *it <= ((vaddr + size - 1) >> YUZU_PAGEBITS);
     }
 
     /// Takes read permission away again from armed pages that were just cached again.
@@ -780,7 +808,9 @@ struct Memory::Impl {
             }
             ++UnmappedReadFlag();
         }, [&]() {
-            HandleRasterizerDownload(addr, sizeof(T));
+            if (!ReadTrapsEnabled() || ReadTrapArmed(addr & 0xffffffffffffULL, sizeof(T))) {
+                HandleRasterizerDownload(addr, sizeof(T));
+            }
         }); ptr) [[likely]] {
             // It may be tempting to rewrite this particular section to use "reinterpret_cast";
             // afterall, it's trivially copyable so surely it can be copied ov- Alignment.
@@ -833,11 +863,32 @@ struct Memory::Impl {
         return true;
     }
 
+    /// A rasterizer-cached page whose host pointer is outside the emulated physical memory has no
+    /// device address to flush or invalidate (its lookup used to read far out of bounds).
+    void ReportForeignPointer(VAddr v_address, const u8* p) const {
+        static std::atomic<u32> reported{};
+        if (reported.fetch_add(1, std::memory_order_relaxed) >= 16) {
+            return;
+        }
+        const auto raw =
+            current_page_table->entries[(v_address & 0xffffffffffffULL) >> YUZU_PAGEBITS].Raw();
+        LOG_ERROR(HW_Memory,
+                  "Rasterizer access at {:#x}: host pointer {} is outside the emulated physical "
+                  "memory at {} (page type {}, block {})",
+                  v_address, fmt::ptr(p),
+                  fmt::ptr(system.DeviceMemory().buffer.BackingBasePointer()),
+                  static_cast<u32>(raw.type), static_cast<u32>(raw.block));
+    }
+
     void HandleRasterizerDownload(VAddr v_address, size_t size) {
         const auto* p = GetPointerImpl(
             v_address, []() {}, []() {});
         if (!gpu_device_memory) [[unlikely]] {
             gpu_device_memory = &system.Host1x().MemoryManager();
+        }
+        if (!gpu_device_memory->IsPhysicalPointer(p)) [[unlikely]] {
+            ReportForeignPointer(v_address, p);
+            return;
         }
         const size_t core = system.GetCurrentHostThreadID();
         if (core >= Core::Hardware::NUM_CPU_CORES) {
@@ -878,6 +929,10 @@ struct Memory::Impl {
                                      sys_core); // any other calls threads go to syscore.
         if (!gpu_device_memory) [[unlikely]] {
             gpu_device_memory = &system.Host1x().MemoryManager();
+        }
+        if (!gpu_device_memory->IsPhysicalPointer(p)) [[unlikely]] {
+            ReportForeignPointer(v_address, p);
+            return;
         }
         // Guard on sys_core;
         if (core == sys_core) [[unlikely]] {
@@ -1033,6 +1088,10 @@ u16 Memory::Read16(const Common::ProcessAddress addr) {
 
 u32 Memory::Read32(const Common::ProcessAddress addr) {
     return impl->Read32(addr);
+}
+
+bool Memory::Read32Acquire(const Common::ProcessAddress addr, u32& value) {
+    return impl->Read32Acquire(addr, value);
 }
 
 u64 Memory::Read64(const Common::ProcessAddress addr) {

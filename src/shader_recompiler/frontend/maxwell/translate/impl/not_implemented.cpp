@@ -15,10 +15,6 @@ namespace Shader::Maxwell {
     throw NotImplementedException("Instruction {} is not implemented", opcode);
 }
 
-void TranslatorVisitor::ATOM_cas(u64) {
-    ThrowNotImplemented(Opcode::ATOM_cas);
-}
-
 void TranslatorVisitor::ATOMS_cas(u64) {
     ThrowNotImplemented(Opcode::ATOMS_cas);
 }
@@ -193,22 +189,6 @@ void TranslatorVisitor::PLONGJMP(u64) {
 
 void TranslatorVisitor::PRET(u64) {
     ThrowNotImplemented(Opcode::PRET);
-}
-
-void TranslatorVisitor::PRMT_reg(u64) {
-    ThrowNotImplemented(Opcode::PRMT_reg);
-}
-
-void TranslatorVisitor::PRMT_rc(u64) {
-    ThrowNotImplemented(Opcode::PRMT_rc);
-}
-
-void TranslatorVisitor::PRMT_cr(u64) {
-    ThrowNotImplemented(Opcode::PRMT_cr);
-}
-
-void TranslatorVisitor::PRMT_imm(u64) {
-    ThrowNotImplemented(Opcode::PRMT_imm);
 }
 
 void TranslatorVisitor::R2B(u64) {

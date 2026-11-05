@@ -90,27 +90,28 @@ void TranslatorVisitor::LDG(u64 insn) {
     // Pointer to load data from
     const IR::U64 address{Address(*this, insn)};
     const IR::Reg dest_reg{ldg.dest_reg};
+    const bool coherent{env.HasNativeInstructions() && ldg.cache == LoadCache::CG};
     switch (ldg.size) {
     case LoadSize::U8:
-        X(dest_reg, ir.LoadGlobalU8(address));
+        X(dest_reg, ir.LoadGlobalU8(address, coherent));
         break;
     case LoadSize::S8:
-        X(dest_reg, ir.LoadGlobalS8(address));
+        X(dest_reg, ir.LoadGlobalS8(address, coherent));
         break;
     case LoadSize::U16:
-        X(dest_reg, ir.LoadGlobalU16(address));
+        X(dest_reg, ir.LoadGlobalU16(address, coherent));
         break;
     case LoadSize::S16:
-        X(dest_reg, ir.LoadGlobalS16(address));
+        X(dest_reg, ir.LoadGlobalS16(address, coherent));
         break;
     case LoadSize::B32:
-        X(dest_reg, ir.LoadGlobal32(address));
+        X(dest_reg, ir.LoadGlobal32(address, coherent));
         break;
     case LoadSize::B64: {
         if (!IR::IsAligned(dest_reg, 2)) {
             throw NotImplementedException("Unaligned data registers");
         }
-        const IR::Value vector{ir.LoadGlobal64(address)};
+        const IR::Value vector{ir.LoadGlobal64(address, coherent)};
         for (int i = 0; i < 2; ++i) {
             X(dest_reg + i, IR::U32{ir.CompositeExtract(vector, static_cast<size_t>(i))});
         }
@@ -121,7 +122,7 @@ void TranslatorVisitor::LDG(u64 insn) {
         if (!IR::IsAligned(dest_reg, 4)) {
             throw NotImplementedException("Unaligned data registers");
         }
-        const IR::Value vector{ir.LoadGlobal128(address)};
+        const IR::Value vector{ir.LoadGlobal128(address, coherent)};
         for (int i = 0; i < 4; ++i) {
             X(dest_reg + i, IR::U32{ir.CompositeExtract(vector, static_cast<size_t>(i))});
         }

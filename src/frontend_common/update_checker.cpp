@@ -5,45 +5,62 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
-#ifdef NIGHTLY_BUILD
-#include <boost/algorithm/string/classification.hpp>
-#include <boost/algorithm/string/split.hpp>
-#endif
-
-#include <fmt/format.h>
-#include "common/net/net.h"
-#include "common/scm_rev.h"
-#include "update_checker.h"
-
+#include <charconv>
 #include "common/logging.h"
+#include "common/scm_rev.h"
+#include "frontend_common/update_checker.h"
 
-std::optional<Common::Net::Release> UpdateChecker::GetUpdate() {
-    const auto latest = Common::Net::GetLatestRelease();
-    if (!latest) return std::nullopt;
+namespace UpdateChecker {
 
-    LOG_INFO(Frontend, "Received update {}", latest->title);
+namespace {
 
-#ifdef NIGHTLY_BUILD
-    std::vector<std::string> result;
-
-    boost::split(result, latest->tag, boost::is_any_of("."));
-    if (result.size() != 2)
+std::optional<u64> ParseBuildNumber(std::string_view tag) {
+    constexpr std::string_view prefix = "build-";
+    if (!tag.starts_with(prefix)) {
         return std::nullopt;
-
-    const std::string tag = result[1];
-
-    boost::split(result, std::string{Common::g_build_version}, boost::is_any_of("-"));
-    if (result.empty())
+    }
+    tag.remove_prefix(prefix.size());
+    u64 number{};
+    const auto [end, error] = std::from_chars(tag.data(), tag.data() + tag.size(), number);
+    if (error != std::errc{} || end != tag.data() + tag.size() || number == 0) {
         return std::nullopt;
-
-    const std::string build = result[0];
-#else
-    const std::string tag = latest->tag;
-    const std::string build = Common::g_build_version;
-#endif
-
-    if (tag != build)
-        return latest;
-
-    return std::nullopt;
+    }
+    return number;
 }
+
+} // namespace
+
+std::optional<Common::Net::Release> SelectUpdate(std::span<const Common::Net::Release> releases,
+                                                 std::string_view build_tag,
+                                                 std::string_view platform) {
+    auto newest = ParseBuildNumber(build_tag);
+    if (!newest) {
+        return std::nullopt;
+    }
+
+    const Common::Net::Release* selected = nullptr;
+    for (const auto& release : releases) {
+        const auto number = ParseBuildNumber(release.tag);
+        if (number && *number > *newest && !release.GetPlatformAssets(platform).empty()) {
+            newest = number;
+            selected = &release;
+        }
+    }
+    return selected ? std::make_optional(*selected) : std::nullopt;
+}
+
+std::optional<Common::Net::Release> GetUpdate() {
+    if (!ParseBuildNumber(Common::g_build_release_tag) ||
+        std::string_view{Common::g_build_release_platform}.empty()) {
+        return std::nullopt;
+    }
+
+    auto update = SelectUpdate(Common::Net::GetReleases(), Common::g_build_release_tag,
+                               Common::g_build_release_platform);
+    if (update) {
+        LOG_INFO(Frontend, "Received update {}", update->title);
+    }
+    return update;
+}
+
+} // namespace UpdateChecker
