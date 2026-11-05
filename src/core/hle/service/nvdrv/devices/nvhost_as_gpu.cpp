@@ -176,9 +176,15 @@ void nvhost_as_gpu::Nx2Map(u64 gpu_address, u64 cpu_address, u64 size) {
     Nx2GpuMemoryRegistry::Get().RecordDeviceRange(cpu_address, size, device_address);
     // On the GPU thread, like unmaps: a GMMU map takes the texture cache lock, and the callers hold
     // nx2:gpu locks that the GPU thread takes under that lock (sparse blocks backed on write).
-    system.GPU().MapInOrder([gmmu = gmmu.get(), gpu_address, device_address, size] {
-        gmmu->Map(gpu_address, device_address, size, Tegra::PTEKind::PITCH, false);
-    });
+    {
+        // Command lists submitted before the GPU thread maps the range are copied through it.
+        std::scoped_lock order{system.GPU().SubmitOrderMutex()};
+        gmmu->QueueMapUpdate(gpu_address, size, device_address);
+        system.GPU().MapInOrder([gmmu = gmmu.get(), gpu_address, device_address, size] {
+            gmmu->Map(gpu_address, device_address, size, Tegra::PTEKind::PITCH, false);
+            gmmu->RetireMapUpdate();
+        });
+    }
     LOG_DEBUG(Service_NVDRV, "Switch 2 GPU mapping {:#x}+{:#x} -> CPU {:#x}", gpu_address, size,
               cpu_address);
 }
@@ -189,7 +195,12 @@ void nvhost_as_gpu::Nx2Unmap(u64 gpu_address, u64 size) {
         return;
     }
     // The GPU thread may still be running command lists that use the range.
-    system.GPU().RunInOrder([gmmu = gmmu.get(), gpu_address, size] { gmmu->Unmap(gpu_address, size); });
+    std::scoped_lock order{system.GPU().SubmitOrderMutex()};
+    gmmu->QueueMapUpdate(gpu_address, size, std::nullopt);
+    system.GPU().RunInOrder([gmmu = gmmu.get(), gpu_address, size] {
+        gmmu->Unmap(gpu_address, size);
+        gmmu->RetireMapUpdate();
+    });
     LOG_DEBUG(Service_NVDRV, "Switch 2 GPU unmapping {:#x}+{:#x}", gpu_address, size);
 }
 
@@ -237,9 +248,12 @@ void nvhost_as_gpu::Nx2Sparse(u64 gpu_address, u64 size, bool create) {
         const DAddr device_address = it->second.second;
         nx2_sparse_ranges.erase(it);
         // After the command lists that may still use it.
+        std::scoped_lock order{system.GPU().SubmitOrderMutex()};
+        gmmu->QueueMapUpdate(gpu_address, size, std::nullopt);
         system.GPU().RunInOrder([gmmu = gmmu.get(), &smmu, gpu_address, size, device_address,
                                  device_size] {
             gmmu->Unmap(gpu_address, size);
+            gmmu->RetireMapUpdate();
             smmu.Unmap(device_address, size);
             smmu.Free(device_address, device_size);
         });
@@ -253,8 +267,11 @@ void nvhost_as_gpu::Nx2Sparse(u64 gpu_address, u64 size, bool create) {
     }
     nx2_sparse_ranges[gpu_address] = {size, device_address};
     // On the GPU thread, as in Nx2Map.
+    std::scoped_lock order{system.GPU().SubmitOrderMutex()};
+    gmmu->QueueMapUpdate(gpu_address, size, device_address);
     system.GPU().MapInOrder([gmmu = gmmu.get(), gpu_address, device_address, size] {
         gmmu->Map(gpu_address, device_address, size, Tegra::PTEKind::PITCH, false);
+        gmmu->RetireMapUpdate();
     });
     LOG_DEBUG(Service_NVDRV, "Switch 2 sparse region {:#x}+{:#x} -> device {:#x}", gpu_address,
               size, device_address);
