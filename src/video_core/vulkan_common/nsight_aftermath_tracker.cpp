@@ -11,7 +11,6 @@
 #include <string>
 #include <string_view>
 #include <utility>
-#include <vector>
 
 #include <fmt/ranges.h>
 
@@ -21,6 +20,7 @@
 #include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "common/scope_exit.h"
+#include "video_core/vulkan_common/aftermath_dump.h"
 #include "video_core/vulkan_common/nsight_aftermath_tracker.h"
 
 namespace Vulkan {
@@ -50,13 +50,13 @@ NsightAftermathTracker::NsightAftermathTracker() {
         LOG_ERROR(Render_Vulkan, "Failed to load Nsight Aftermath function pointers");
         return;
     }
-    dump_dir = Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) / "gpucrash";
-
-    Common::FS::RemoveDirRecursively(dump_dir);
-    if (!Common::FS::CreateDir(dump_dir)) {
+    const auto directory = CreateAftermathDumpDirectory(
+        Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) / "gpucrash");
+    if (!directory) {
         LOG_ERROR(Render_Vulkan, "Failed to create Nsight Aftermath dump directory");
         return;
     }
+    dump_dir = *directory;
     if (!GFSDK_Aftermath_SUCCEED(GFSDK_Aftermath_EnableGpuCrashDumps(
             GFSDK_Aftermath_Version_API, GFSDK_Aftermath_GpuCrashDumpWatchedApiFlags_Vulkan,
             GFSDK_Aftermath_GpuCrashDumpFeatureFlags_Default, GpuCrashDumpCallback,
@@ -113,32 +113,7 @@ void NsightAftermathTracker::OnGpuCrashDumpCallback(const void* gpu_crash_dump,
 
     LOG_CRITICAL(Render_Vulkan, "called");
 
-    GFSDK_Aftermath_GpuCrashDump_Decoder decoder;
-    if (!GFSDK_Aftermath_SUCCEED(GFSDK_Aftermath_GpuCrashDump_CreateDecoder(
-            GFSDK_Aftermath_Version_API, gpu_crash_dump, gpu_crash_dump_size, &decoder))) {
-        LOG_ERROR(Render_Vulkan, "Failed to create decoder");
-        return;
-    }
-    SCOPE_EXIT {
-        GFSDK_Aftermath_GpuCrashDump_DestroyDecoder(decoder);
-    };
-
-    u32 json_size = 0;
-    if (!GFSDK_Aftermath_SUCCEED(GFSDK_Aftermath_GpuCrashDump_GenerateJSON(
-            decoder, GFSDK_Aftermath_GpuCrashDumpDecoderFlags_ALL_INFO,
-            GFSDK_Aftermath_GpuCrashDumpFormatterFlags_NONE, nullptr, nullptr, nullptr, this,
-            &json_size))) {
-        LOG_ERROR(Render_Vulkan, "Failed to generate JSON");
-        return;
-    }
-    std::vector<char> json(json_size);
-    if (!GFSDK_Aftermath_SUCCEED(
-            GFSDK_Aftermath_GpuCrashDump_GetJSON(decoder, json_size, json.data()))) {
-        LOG_ERROR(Render_Vulkan, "Failed to query JSON");
-        return;
-    }
-
-    std::filesystem::path base_name = [this] {
+    const std::filesystem::path base_name = [this] {
         const int id = dump_id++;
         if (id == 0) {
             return dump_dir / "crash.nv-gpudmp";
@@ -148,17 +123,32 @@ void NsightAftermathTracker::OnGpuCrashDumpCallback(const void* gpu_crash_dump,
     }();
 
     std::string_view dump_view(static_cast<const char*>(gpu_crash_dump), gpu_crash_dump_size);
-    if (Common::FS::WriteStringToFile(base_name, Common::FS::FileType::BinaryFile, dump_view) !=
-        gpu_crash_dump_size) {
-        LOG_ERROR(Render_Vulkan, "Failed to write dump file");
-        return;
-    }
-    const std::string_view json_view(json.data(), json.size());
-    if (Common::FS::WriteStringToFile(base_name.concat(".json"), Common::FS::FileType::TextFile,
-                                      json_view) != json.size()) {
-        LOG_ERROR(Render_Vulkan, "Failed to write JSON");
-        return;
-    }
+    SaveAftermathCrashDump(base_name, dump_view, [&]() -> std::optional<std::string> {
+        GFSDK_Aftermath_GpuCrashDump_Decoder decoder;
+        if (!GFSDK_Aftermath_SUCCEED(GFSDK_Aftermath_GpuCrashDump_CreateDecoder(
+                GFSDK_Aftermath_Version_API, gpu_crash_dump, gpu_crash_dump_size, &decoder))) {
+            LOG_ERROR(Render_Vulkan, "Failed to create decoder");
+            return std::nullopt;
+        }
+        SCOPE_EXIT {
+            GFSDK_Aftermath_GpuCrashDump_DestroyDecoder(decoder);
+        };
+        u32 json_size = 0;
+        if (!GFSDK_Aftermath_SUCCEED(GFSDK_Aftermath_GpuCrashDump_GenerateJSON(
+                decoder, GFSDK_Aftermath_GpuCrashDumpDecoderFlags_ALL_INFO,
+                GFSDK_Aftermath_GpuCrashDumpFormatterFlags_NONE, nullptr, nullptr, nullptr, this,
+                &json_size))) {
+            LOG_ERROR(Render_Vulkan, "Failed to generate JSON");
+            return std::nullopt;
+        }
+        std::string json(json_size, '\0');
+        if (!GFSDK_Aftermath_SUCCEED(
+                GFSDK_Aftermath_GpuCrashDump_GetJSON(decoder, json_size, json.data()))) {
+            LOG_ERROR(Render_Vulkan, "Failed to query JSON");
+            return std::nullopt;
+        }
+        return json;
+    });
 }
 
 void NsightAftermathTracker::OnShaderDebugInfoCallback(const void* shader_debug_info,

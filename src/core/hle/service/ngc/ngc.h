@@ -6,12 +6,20 @@
 
 #pragma once
 
+#include <memory>
+
 namespace Core {
 class System;
 }
 
-namespace Service::NGC {
+namespace Service {
+class ServiceFrameworkBase;
+
+namespace NGC {
+
+std::shared_ptr<ServiceFrameworkBase> CreateStreamPlayUserService(Core::System& system);
 
 void LoopProcess(Core::System& system);
 
-} // namespace Service::NGC
+} // namespace NGC
+} // namespace Service

@@ -56,6 +56,32 @@ class RenderPassCache;
 class StagingBufferPool;
 class Scheduler;
 
+struct ByteAddressedShadow {
+    VkImage original{};
+    VkImage packed{};
+    VkImageView view{};
+    VkBuffer bridge{};
+    VkExtent2D extent{};
+};
+
+struct ByteAddressedRange {
+    DAddr address{};
+    u64 size{};
+
+    [[nodiscard]] bool Overlaps(const ByteAddressedRange& other) const noexcept {
+        return size != 0 && other.size != 0 &&
+               (address < other.address ? other.address - address < size
+                                        : address - other.address < other.size);
+    }
+};
+
+[[nodiscard]] inline std::optional<VkExtent2D> PackedByteAddressedExtent(u32 width, u32 height) {
+    if (width < 2 || (width & 1) != 0 || height == 0) {
+        return std::nullopt;
+    }
+    return VkExtent2D{width / 2, height};
+}
+
 class TextureCacheRuntime {
 public:
     explicit TextureCacheRuntime(const Device& device_, Scheduler& scheduler_,
@@ -120,7 +146,7 @@ public:
     bool TemporalUpscale(Framebuffer* dst_framebuffer, ImageView& dst, ImageView& input_color,
                          ImageView& motion_vectors, ImageView* depth,
                          std::array<u32, 2> render_size, std::array<f32, 2> jitter,
-                         std::array<f32, 2> motion_scale);
+                         std::array<f32, 2> motion_scale, bool use_history);
 
     /// True when TemporalUpscale would use the depth (FSR 3.1 not forced off and not failed).
     [[nodiscard]] bool WantsTemporalUpscaleDepth() const;
@@ -140,6 +166,13 @@ public:
     bool ShouldReinterpret(Image& dst, Image& src);
 
     void ReinterpretImage(Image& dst, Image& src, std::span<const VideoCommon::ImageCopy> copies);
+
+    [[nodiscard]] ByteAddressedShadow CreateByteAddressedShadow(const ImageView& view);
+
+    void RetireByteAddressedShadow(const ByteAddressedShadow& shadow);
+
+    static void CopyByteAddressedShadow(vk::CommandBuffer cmdbuf,
+                                        const ByteAddressedShadow& shadow, bool unpack);
 
     void ConvertImage(Framebuffer* dst, ImageView& dst_view, ImageView& src_view);
 
@@ -306,6 +339,14 @@ public:
     std::vector<MsaaScratchImage> msaa_scratch_images;
     ::Common::unordered_map<VkImage, ResolveShadow> resolve_shadows;
     std::vector<std::pair<u64, ResolveShadow>> pending_resolve_shadows;
+
+    struct PendingByteAddressedShadow {
+        u64 tick;
+        vk::Image image;
+        vk::ImageView view;
+        vk::Buffer bridge;
+    };
+    std::deque<PendingByteAddressedShadow> pending_byte_addressed_shadows;
 };
 
 class Framebuffer {
@@ -346,6 +387,10 @@ public:
 
     [[nodiscard]] VkExtent2D RenderArea() const noexcept {
         return render_area;
+    }
+
+    [[nodiscard]] u32 Layers() const noexcept {
+        return layers;
     }
 
     [[nodiscard]] VkSampleCountFlagBits Samples() const noexcept {
@@ -402,6 +447,7 @@ private:
     vk::Framebuffer framebuffer;
     VkRenderPass renderpass{};
     VkExtent2D render_area{};
+    u32 layers = 1;
     VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
     u32 num_color_buffers = 0;
     u32 num_images = 0;
@@ -668,7 +714,7 @@ public:
     [[nodiscard]] VkImageView ColorView();
 
     [[nodiscard]] VkImageView StorageView(Shader::TextureType texture_type,
-                                          Shader::ImageFormat image_format);
+                                          Shader::ImageFormat image_format, bool is_byte_addressed);
 
     [[nodiscard]] bool IsRescaled() const noexcept;
 
@@ -678,6 +724,10 @@ public:
 
     [[nodiscard]] VkImage ImageHandle() const noexcept {
         return image_handle;
+    }
+
+    [[nodiscard]] const Image* BackingImage() const noexcept {
+        return slot_images && image_id ? &(*slot_images)[image_id] : nullptr;
     }
 
     [[nodiscard]] VkImageView RenderTarget() const noexcept {
@@ -718,8 +768,8 @@ public:
 
 private:
     struct StorageViews {
-        std::array<vk::ImageView, Shader::NUM_TEXTURE_TYPES> signeds;
-        std::array<vk::ImageView, Shader::NUM_TEXTURE_TYPES> unsigneds;
+        std::array<std::array<vk::ImageView, Shader::NUM_TEXTURE_TYPES>,
+                   static_cast<size_t>(Shader::ImageFormat::R32G32B32A32_UINT) + 1> formats;
     };
 
     [[nodiscard]] vk::ImageView MakeView(VkFormat vk_format, VkImageAspectFlags aspect_mask,

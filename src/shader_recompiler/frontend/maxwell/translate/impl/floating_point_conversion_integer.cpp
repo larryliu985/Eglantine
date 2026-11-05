@@ -14,7 +14,7 @@
 namespace Shader::Maxwell {
 namespace {
 enum class DestFormat : u64 {
-    Invalid,
+    I8,
     I16,
     I32,
     I64,
@@ -48,6 +48,8 @@ union F2I {
 
 size_t BitSize(DestFormat dest_format) {
     switch (dest_format) {
+    case DestFormat::I8:
+        return 8;
     case DestFormat::I16:
         return 16;
     case DestFormat::I32:
@@ -62,6 +64,9 @@ size_t BitSize(DestFormat dest_format) {
 std::pair<f64, f64> ClampBounds(DestFormat format, bool is_signed) {
     if (is_signed) {
         switch (format) {
+        case DestFormat::I8:
+            return {static_cast<f64>((std::numeric_limits<s8>::max)()),
+                    static_cast<f64>((std::numeric_limits<s8>::min)())};
         case DestFormat::I16:
             return {static_cast<f64>((std::numeric_limits<s16>::max)()),
                     static_cast<f64>((std::numeric_limits<s16>::min)())};
@@ -76,6 +81,9 @@ std::pair<f64, f64> ClampBounds(DestFormat format, bool is_signed) {
         }
     } else {
         switch (format) {
+        case DestFormat::I8:
+            return {static_cast<f64>((std::numeric_limits<u8>::max)()),
+                    static_cast<f64>((std::numeric_limits<u8>::min)())};
         case DestFormat::I16:
             return {static_cast<f64>((std::numeric_limits<u16>::max)()),
                     static_cast<f64>((std::numeric_limits<u16>::min)())};
@@ -146,25 +154,45 @@ void TranslateF2I(TranslatorVisitor& v, u64 insn, const IR::F16F32F64& src_a) {
     }()};
     const bool is_signed{f2i.is_signed != 0};
     const auto [max_bound, min_bound] = ClampBounds(f2i.dest_format, is_signed);
+    const bool unsigned_f32_i64{f2i.dest_format == DestFormat::I64 &&
+                                f2i.src_format == SrcFormat::F32 && !is_signed};
 
     IR::F16F32F64 intermediate;
     switch (f2i.src_format) {
     case SrcFormat::F16: {
         const IR::F16 max_val{v.ir.FPConvert(16, v.ir.Imm32(static_cast<f32>(max_bound)))};
         const IR::F16 min_val{v.ir.FPConvert(16, v.ir.Imm32(static_cast<f32>(min_bound)))};
-        intermediate = v.ir.FPClamp(rounded_value, min_val, max_val);
+        IR::F16 safe_value{rounded_value};
+        if (f2i.dest_format == DestFormat::I8) {
+            const IR::F32 widened{v.ir.FPConvert(32, safe_value)};
+            const IR::F32 selected{v.ir.Select(v.ir.FPIsNan(op_a),
+                                              v.ir.Imm32(static_cast<f32>(min_bound)), widened)};
+            safe_value = v.ir.FPConvert(16, selected);
+        }
+        intermediate = v.ir.FPClamp(safe_value, min_val, max_val);
         break;
     }
     case SrcFormat::F32: {
-        const IR::F32 max_val{v.ir.Imm32(static_cast<f32>(max_bound))};
+        const IR::F32 max_val{
+            v.ir.Imm32(unsigned_f32_i64 ? 0x1.fffffep63f : static_cast<f32>(max_bound))};
         const IR::F32 min_val{v.ir.Imm32(static_cast<f32>(min_bound))};
-        intermediate = v.ir.FPClamp(rounded_value, min_val, max_val);
+        IR::F32 safe_value{rounded_value};
+        if (unsigned_f32_i64 || f2i.dest_format == DestFormat::I8) {
+            safe_value = IR::F32{v.ir.Select(v.ir.FPIsNan(op_a), min_val, safe_value)};
+        }
+        intermediate = v.ir.FPClamp(safe_value, min_val, max_val);
         break;
     }
     case SrcFormat::F64: {
-        const IR::F64 max_val{v.ir.Imm64(max_bound)};
-        const IR::F64 min_val{v.ir.Imm64(min_bound)};
-        intermediate = v.ir.FPClamp(rounded_value, min_val, max_val);
+        if (f2i.dest_format == DestFormat::I8) {
+            const IR::F32 max_val{v.ir.Imm32(static_cast<f32>(max_bound))};
+            const IR::F32 min_val{v.ir.Imm32(static_cast<f32>(min_bound))};
+            const IR::F32 narrowed{v.ir.FPConvert(32, rounded_value)};
+            const IR::F32 safe_value{v.ir.Select(v.ir.FPIsNan(op_a), min_val, narrowed)};
+            intermediate = v.ir.FPClamp(safe_value, min_val, max_val);
+        } else {
+            intermediate = v.ir.FPClamp(rounded_value, v.ir.Imm64(min_bound), v.ir.Imm64(max_bound));
+        }
         break;
     }
     default:
@@ -173,6 +201,10 @@ void TranslateF2I(TranslatorVisitor& v, u64 insn, const IR::F16F32F64& src_a) {
 
     const size_t bitsize{std::max<size_t>(32, BitSize(f2i.dest_format))};
     IR::U16U32U64 result{v.ir.ConvertFToI(bitsize, is_signed, intermediate)};
+    if (unsigned_f32_i64) {
+        result = IR::U64{v.ir.Select(v.ir.FPGreaterThanEqual(op_a, v.ir.Imm32(0x1p64f)),
+                                     v.ir.Imm64((std::numeric_limits<u64>::max)()), result)};
+    }
 
     bool handled_special_case = false;
     const bool special_nan_cases =

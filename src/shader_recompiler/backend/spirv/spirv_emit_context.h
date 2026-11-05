@@ -213,6 +213,8 @@ public:
 
     const Profile& profile;
     const RuntimeInfo& runtime_info;
+    const bool requires_coherent_global_memory;
+    const bool requires_coherent_image_memory;
     Stage stage{};
 
     Id void_id{};
@@ -343,6 +345,8 @@ public:
     Id write_global_func_u32{};
     Id write_global_func_u32x2{};
     Id write_global_func_u32x4{};
+    Id atomic_add_global_func_u32{};
+    Id atomic_umax_global_func_u32{};
 
     bool need_input_position_indirect{};
     Id input_position{};
@@ -360,6 +364,7 @@ public:
     Id sample_mask{};
     Id frag_depth{};
 
+    std::array<Id, 2> software_matrix_functions{};
     std::vector<Id> interfaces;
     std::vector<std::pair<u32, spv::Op>> opcode_rewrites;
 
@@ -420,7 +425,7 @@ private:
     void DefineImages(const Info& info, u32& binding, u32& scaling_index);
     void DefineAttributeMemAccess(const Info& info);
     void DefineWriteStorageCasLoopFunction(const Info& info);
-    void DefineGlobalMemoryFunctions(const Info& info);
+    void DefineGlobalMemoryFunctions(const IR::Program& program);
     void DefineRescalingInput(const Info& info);
     void DefineRescalingInputPushConstant();
     void DefineRescalingInputUniformConstant();

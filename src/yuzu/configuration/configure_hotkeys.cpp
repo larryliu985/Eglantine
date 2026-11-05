@@ -23,6 +23,14 @@ constexpr int name_column = 0;
 constexpr int hotkey_column = 1;
 constexpr int controller_column = 2;
 
+static QString HotkeyDisplayName(const QString& action) {
+    // Keep the stored shortcut key compatible with existing configurations.
+    if (action == QStringLiteral("Exit Eglantine")) {
+        return QCoreApplication::translate("Hotkeys", "Exit Lichii");
+    }
+    return QCoreApplication::translate("Hotkeys", qPrintable(action));
+}
+
 ConfigureHotkeys::ConfigureHotkeys(Core::HID::HIDCore& hid_core, QWidget* parent)
     : QWidget(parent), ui(std::make_unique<Ui::ConfigureHotkeys>()),
       timeout_timer(std::make_unique<QTimer>()), poll_timer(std::make_unique<QTimer>()) {
@@ -81,8 +89,7 @@ void ConfigureHotkeys::Populate(const HotkeyRegistry& registry) {
         parent_item->setData(parent_item_data);
         for (const auto& hotkey : group.second) {
             QString hotkey_action_data = QString::fromStdString(hotkey.first);
-            auto* action = new QStandardItem(
-                QCoreApplication::translate("Hotkeys", qPrintable(hotkey_action_data)));
+            auto* action = new QStandardItem(HotkeyDisplayName(hotkey_action_data));
             auto* keyseq =
                 new QStandardItem(hotkey.second.keyseq.toString(QKeySequence::NativeText));
             auto* controller_keyseq =
@@ -119,8 +126,7 @@ void ConfigureHotkeys::RetranslateUI() {
             QCoreApplication::translate("Hotkeys", qPrintable(parent->data().toString())));
         for (int key_column_id = 0; key_column_id < parent->rowCount(); key_column_id++) {
             QStandardItem* action = parent->child(key_column_id, name_column);
-            action->setText(
-                QCoreApplication::translate("Hotkeys", qPrintable(action->data().toString())));
+            action->setText(HotkeyDisplayName(action->data().toString()));
         }
     }
 }

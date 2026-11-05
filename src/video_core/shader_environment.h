@@ -21,6 +21,7 @@
 #include "common/polyfill_thread.h"
 #include "common/unique_function.h"
 #include "shader_recompiler/environment.h"
+#include "shader_recompiler/frontend/ampere/instruction.h"
 #include "video_core/engines/maxwell_3d.h"
 
 namespace Tegra {
@@ -32,10 +33,11 @@ namespace VideoCommon {
 /// A native (Switch 2) program after capture and lowering to Maxwell code. The shader cache keeps
 /// it so the environments built for the program's pipelines don't capture and lower it again.
 struct LoweredNativeCode {
-    u64 diagnostic_key{};
+    u64 native_program_key{};
     /// Shader header, lowered instructions with Maxwell scheduling words, then the native
     /// address map (what the environment's `code` used to be filled with).
     std::vector<u64> code;
+    std::vector<Shader::Ampere::Instruction> trap_prefix;
     /// Bytes of the native program that were read, header included.
     size_t source_size{};
     /// Constant buffer holding the texture handles if the program requires one, otherwise ~0U
@@ -67,6 +69,9 @@ public:
 
     [[nodiscard]] bool IsCbufStorageBufferPointer(u32 index, u32 offset) override;
 
+    [[nodiscard]] bool IsCbufIndirectStorageBufferPointer(u32 index, u32 offset,
+                                                          u32 indirect) override;
+
     [[nodiscard]] std::optional<u64> Analyze();
 
     void SetCachedSize(size_t size_bytes);
@@ -96,18 +101,18 @@ public:
     bool HasHLEMacroState() const override {
         return has_hle_engine_state;
     }
+    bool HasNativeInstructions() const override;
 
 protected:
     std::optional<u64> TryFindSize();
+    virtual std::optional<u32> ReadTrapGuardConstant(u32, u32) { return std::nullopt; }
 
     /// Adopts an already lowered native program, or captures and lowers it when there is none.
     void InitializeNativeCode(std::shared_ptr<const LoweredNativeCode> lowered,
-                              u32 source_header_size = 128, bool geometry = false);
+                              u32 source_header_size = 128, bool geometry_stage = false);
     std::shared_ptr<const LoweredNativeCode> LowerNativeCode(u32 source_header_size,
-                                                              bool geometry = false);
+                                                          bool geometry_stage);
     size_t native_source_size{};
-    /// Lower matrix multiplies too (KeplerCompute::EmulatesNativeTensorPrograms).
-    bool native_tensor{};
     std::shared_ptr<const LoweredNativeCode> lowered_native;
 
     Tegra::Texture::TICEntry ReadTextureInfo(GPUVAddr tic_addr, u32 tic_limit,
@@ -195,8 +200,12 @@ public:
     }
 
 private:
+    std::optional<u32> ReadTrapGuardConstant(u32 bank, u32 offset) override;
     Tegra::Engines::KeplerCompute* kepler_compute{};
 };
+
+std::optional<u32> ReadNativeGuardConstant(Tegra::Engines::KeplerCompute& compute,
+                                         Tegra::MemoryManager& memory, u32 bank, u32 offset);
 
 class FileEnvironment final : public Shader::Environment {
 public:
@@ -218,6 +227,9 @@ public:
     [[nodiscard]] bool IsNativeProgram() const override;
 
     [[nodiscard]] bool IsCbufStorageBufferPointer(u32 index, u32 offset) override;
+
+    [[nodiscard]] bool IsCbufIndirectStorageBufferPointer(u32 index, u32 offset,
+                                                          u32 indirect) override;
 
     [[nodiscard]] u32 ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) override;
 
@@ -243,6 +255,7 @@ public:
     [[nodiscard]] bool HasHLEMacroState() const override {
         return cbuf_replacements.size() != 0;
     }
+    bool HasNativeInstructions() const override;
 
     void Dump(u64 pipeline_hash, u64 shader_hash) override;
 

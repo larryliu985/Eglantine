@@ -65,6 +65,84 @@
           </property>
          </widget>
         </item>
+        <item alignment="Qt::AlignHCenter">
+         <widget class="QWidget" name="nup_icon_widget" native="true">
+          <property name="minimumSize">
+           <size>
+            <width>256</width>
+            <height>0</height>
+           </size>
+          </property>
+          <property name="maximumSize">
+           <size>
+            <width>256</width>
+            <height>16777215</height>
+           </size>
+          </property>
+          <layout class="QGridLayout" name="nup_icon_layout">
+           <property name="spacing">
+            <number>6</number>
+           </property>
+           <property name="leftMargin">
+            <number>0</number>
+           </property>
+           <property name="topMargin">
+            <number>0</number>
+           </property>
+           <property name="rightMargin">
+            <number>0</number>
+           </property>
+           <property name="bottomMargin">
+            <number>2</number>
+           </property>
+           <item row="0" column="0">
+            <widget class="QPushButton" name="button_detect_icon">
+             <property name="sizePolicy">
+              <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
+               <horstretch>0</horstretch>
+               <verstretch>0</verstretch>
+              </sizepolicy>
+             </property>
+             <property name="toolTip">
+              <string>Preview a local icon next to the archive. Online lookup is optional. Apply or OK saves changes.</string>
+             </property>
+             <property name="text">
+              <string>Detect Icon</string>
+             </property>
+            </widget>
+           </item>
+           <item row="0" column="1">
+            <widget class="QPushButton" name="button_upload_icon">
+             <property name="sizePolicy">
+              <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
+               <horstretch>0</horstretch>
+               <verstretch>0</verstretch>
+              </sizepolicy>
+             </property>
+             <property name="toolTip">
+              <string>Preview a local image as the game icon. Apply or OK saves changes.</string>
+             </property>
+             <property name="text">
+              <string>Upload Icon...</string>
+             </property>
+            </widget>
+           </item>
+           <item row="1" column="0" colspan="2">
+            <widget class="QCheckBox" name="allow_online_detection">
+             <property name="text">
+              <string>Allow online lookup</string>
+             </property>
+             <property name="toolTip">
+              <string>If no local icon is found, send the game name to GitHub, Wikipedia and Bing to look for an icon. Disabled by default.</string>
+             </property>
+             <property name="checked">
+              <bool>false</bool>
+             </property>
+            </widget>
+           </item>
+          </layout>
+         </widget>
+        </item>
         <item>
          <layout class="QGridLayout" name="gridLayout_2">
           <item row="6" column="1">

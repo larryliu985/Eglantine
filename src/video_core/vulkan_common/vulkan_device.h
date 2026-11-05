@@ -81,6 +81,8 @@ VK_DEFINE_HANDLE(VmaPool)
     FEATURE(KHR, PipelineExecutableProperties, PIPELINE_EXECUTABLE_PROPERTIES,                     \
             pipeline_executable_properties)                                                        \
     FEATURE(KHR, ShaderQuadControl, SHADER_QUAD_CONTROL, shader_quad_control)                      \
+    FEATURE(KHR, ShaderMaximalReconvergence, SHADER_MAXIMAL_RECONVERGENCE,                        \
+            shader_maximal_reconvergence)                                                        \
     FEATURE(KHR, WorkgroupMemoryExplicitLayout, WORKGROUP_MEMORY_EXPLICIT_LAYOUT,                  \
             workgroup_memory_explicit_layout)
 
@@ -661,6 +663,16 @@ FN_MAX_LIMIT_LIST
     /// Returns true if the device supports VK_KHR_shader_quad_control.
     bool IsKhrShaderQuadControlSupported() const {
         return extensions.shader_quad_control && features.shader_quad_control.shaderQuadControl;
+    }
+
+    /// Returns true if the device can build tessellation pipelines.
+    bool IsTessellationSupported() const {
+        return features.features.tessellationShader;
+    }
+
+    /// Returns the largest patch size (control points, and TCS output vertices) a pipeline allows.
+    u32 GetMaxTessellationPatchSize() const {
+        return properties.properties.limits.maxTessellationPatchSize;
     }
 
     /// Returns true if the device supports task and mesh shaders (VK_EXT_mesh_shader).

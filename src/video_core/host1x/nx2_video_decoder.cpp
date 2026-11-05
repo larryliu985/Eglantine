@@ -195,6 +195,7 @@ void Nx2VideoDecoder::Reset() {
         avcodec_flush_buffers(impl->context->GetCodecContext());
     }
     impl->pending_pts.clear();
+    impl->h264_packets.Reset();
 }
 
 void Nx2VideoDecoder::Render(const Nx2Picture& picture, Nx2PictureFormat format, u32 width,
@@ -203,7 +204,8 @@ void Nx2VideoDecoder::Render(const Nx2Picture& picture, Nx2PictureFormat format,
     const u64 needed = format == Nx2PictureFormat::Nv12
                            ? chroma_offset + pitch * ((u64{height} + 1) / 2)
                            : pitch * height;
-    if (width == 0 || height == 0 || out.size() < needed) {
+    const u64 min_pitch = format == Nx2PictureFormat::Nv12 ? ((u64{width} + 1) / 2) * 2 : 0;
+    if (width == 0 || height == 0 || pitch < min_pitch || out.size() < needed) {
         return;
     }
     const AVPixelFormat target = format == Nx2PictureFormat::Nv12    ? AV_PIX_FMT_NV12
@@ -219,7 +221,25 @@ void Nx2VideoDecoder::Render(const Nx2Picture& picture, Nx2PictureFormat format,
         }
         for (u32 y = 0; y < (height + 1) / 2; ++y) {
             std::memcpy(out.data() + chroma_offset + y * pitch, f->data[1] + y * f->linesize[1],
-                        width);
+                        min_pitch);
+        }
+        return;
+    }
+    if (target == AV_PIX_FMT_NV12 && f->format == AV_PIX_FMT_YUV420P &&
+        f->color_range != AVCOL_RANGE_JPEG && static_cast<u32>(f->width) == width &&
+        static_cast<u32>(f->height) == height) {
+        for (u32 y = 0; y < height; ++y) {
+            std::memcpy(out.data() + y * pitch, f->data[0] + y * f->linesize[0], width);
+        }
+        const u32 chroma_width = static_cast<u32>(min_pitch / 2);
+        for (u32 y = 0; y < (height + 1) / 2; ++y) {
+            const u8* u = f->data[1] + y * f->linesize[1];
+            const u8* v = f->data[2] + y * f->linesize[2];
+            u8* dst = out.data() + chroma_offset + y * pitch;
+            for (u32 x = 0; x < chroma_width; ++x) {
+                dst[x * 2] = u[x];
+                dst[x * 2 + 1] = v[x];
+            }
         }
         return;
     }
@@ -233,19 +253,23 @@ void Nx2VideoDecoder::Render(const Nx2Picture& picture, Nx2PictureFormat format,
                   av_get_pix_fmt_name(target));
         return;
     }
-    if (format != Nx2PictureFormat::Nv12) {
-        // The stream's matrix and range; untagged HD video is BT.709.
-        int space = SWS_CS_ITU601;
-        if (f->colorspace == AVCOL_SPC_BT709 ||
-            (f->colorspace == AVCOL_SPC_UNSPECIFIED && f->height >= 720)) {
-            space = SWS_CS_ITU709;
-        } else if (f->colorspace == AVCOL_SPC_BT2020_NCL || f->colorspace == AVCOL_SPC_BT2020_CL) {
-            space = SWS_CS_BT2020;
-        }
-        const int* coefficients = sws_getCoefficients(space);
-        sws_setColorspaceDetails(impl->scaler, coefficients, f->color_range == AVCOL_RANGE_JPEG,
-                                 coefficients, 1, 0, 1 << 16, 1 << 16);
+    // The stream's matrix and range; untagged HD video is BT.709.
+    int space = SWS_CS_ITU601;
+    if (f->colorspace == AVCOL_SPC_BT709 ||
+        (f->colorspace == AVCOL_SPC_UNSPECIFIED && f->height >= 720)) {
+        space = SWS_CS_ITU709;
+    } else if (f->colorspace == AVCOL_SPC_BT2020_NCL || f->colorspace == AVCOL_SPC_BT2020_CL) {
+        space = SWS_CS_BT2020;
     }
+    const bool full_range_source = f->color_range == AVCOL_RANGE_JPEG ||
+                                  f->format == AV_PIX_FMT_YUVJ420P ||
+                                  f->format == AV_PIX_FMT_YUVJ422P ||
+                                  f->format == AV_PIX_FMT_YUVJ444P ||
+                                  f->format == AV_PIX_FMT_YUVJ440P ||
+                                  f->format == AV_PIX_FMT_YUVJ411P;
+    const int* coefficients = sws_getCoefficients(space);
+    sws_setColorspaceDetails(impl->scaler, coefficients, full_range_source, coefficients,
+                             format != Nx2PictureFormat::Nv12, 0, 1 << 16, 1 << 16);
     std::array<u8*, 4> planes{out.data(), nullptr, nullptr, nullptr};
     std::array<int, 4> strides{static_cast<int>(pitch), 0, 0, 0};
     if (format == Nx2PictureFormat::Nv12) {

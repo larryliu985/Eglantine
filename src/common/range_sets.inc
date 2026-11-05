@@ -193,11 +193,18 @@ template <typename AddressType>
 RangeSet<AddressType>::RangeSet(RangeSet&& other) {
     m_impl = std::make_unique<RangeSet<AddressType>::RangeSetImpl>();
     m_impl->m_ranges_set = std::move(other.m_impl->m_ranges_set);
+    // A moved-from container is only "valid but unspecified". Callers hand ranges over by
+    // moving and then keep adding to the source (BufferCache::AccumulateFlushes).
+    other.m_impl->m_ranges_set.clear();
 }
 
 template <typename AddressType>
 RangeSet<AddressType>& RangeSet<AddressType>::operator=(RangeSet&& other) {
-    m_impl->m_ranges_set = std::move(other.m_impl->m_ranges_set);
+    if (this != &other) {
+        m_impl->m_ranges_set = std::move(other.m_impl->m_ranges_set);
+        other.m_impl->m_ranges_set.clear();
+    }
+    return *this;
 }
 
 template <typename AddressType>
@@ -257,11 +264,16 @@ template <typename AddressType>
 OverlapRangeSet<AddressType>::OverlapRangeSet(OverlapRangeSet&& other) {
     m_impl = std::make_unique<OverlapRangeSet<AddressType>::OverlapRangeSetImpl>();
     m_impl->m_split_ranges_set = std::move(other.m_impl->m_split_ranges_set);
+    other.m_impl->m_split_ranges_set.clear();
 }
 
 template <typename AddressType>
 OverlapRangeSet<AddressType>& OverlapRangeSet<AddressType>::operator=(OverlapRangeSet&& other) {
-    m_impl->m_split_ranges_set = std::move(other.m_impl->m_split_ranges_set);
+    if (this != &other) {
+        m_impl->m_split_ranges_set = std::move(other.m_impl->m_split_ranges_set);
+        other.m_impl->m_split_ranges_set.clear();
+    }
+    return *this;
 }
 
 template <typename AddressType>

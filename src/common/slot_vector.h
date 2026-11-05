@@ -138,6 +138,11 @@ public:
         ResetStorageBit(id.Value());
     }
 
+    [[nodiscard]] bool contains(SlotId id) const noexcept {
+        return id && id.Value() < values_capacity &&
+               ((stored_bitset[id.Value() / 64] >> (id.Value() % 64)) & 1) != 0;
+    }
+
     [[nodiscard]] Iterator begin() noexcept {
         const auto it = std::ranges::find_if(stored_bitset, [](u64 value) { return value != 0; });
         if (it == stored_bitset.end()) {

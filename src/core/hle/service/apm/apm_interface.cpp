@@ -42,11 +42,12 @@ private:
         IPC::RequestParser rp{ctx};
 
         const auto mode = rp.PopEnum<PerformanceMode>();
-        LOG_DEBUG(Service_APM, "called mode={}", mode);
+        const auto config = controller.GetCurrentPerformanceConfiguration(mode);
+        LOG_DEBUG(Service_APM, "called mode={} config={}", mode, config);
 
         IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(ResultSuccess);
-        rb.PushEnum(controller.GetCurrentPerformanceConfiguration(mode));
+        rb.PushEnum(config);
     }
 
     void SetCpuOverclockEnabled(HLERequestContext& ctx) {
@@ -141,12 +142,13 @@ void APM_Sys::SetCpuBoostMode(HLERequestContext& ctx) {
 }
 
 void APM_Sys::GetCurrentPerformanceConfiguration(HLERequestContext& ctx) {
-    LOG_DEBUG(Service_APM, "called");
+    const auto mode = controller.GetCurrentPerformanceMode();
+    const auto config = controller.GetCurrentPerformanceConfiguration(mode);
+    LOG_DEBUG(Service_APM, "called mode={} config={}", mode, config);
 
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
-    rb.PushEnum(
-        controller.GetCurrentPerformanceConfiguration(controller.GetCurrentPerformanceMode()));
+    rb.PushEnum(config);
 }
 
 } // namespace Service::APM

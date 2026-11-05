@@ -7,7 +7,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include "common/slot_vector.h"
 
-TEST_CASE("SlotVector visits live entries across empty bitmap words", "[common]") {
+TEST_CASE("SlotVector begins at the first live entry after empty bitmap words", "[common]") {
     Common::SlotVector<u32> slots;
     std::vector<Common::SlotId> ids;
     for (u32 i = 0; i < 513; ++i) {

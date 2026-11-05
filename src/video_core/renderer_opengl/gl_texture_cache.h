@@ -270,7 +270,7 @@ public:
     ImageView& operator=(ImageView&&) = default;
 
     [[nodiscard]] GLuint StorageView(Shader::TextureType texture_type,
-                                     Shader::ImageFormat image_format);
+                                     Shader::ImageFormat image_format, bool is_byte_addressed);
 
     [[nodiscard]] GLuint Handle(Shader::TextureType handle_type) const noexcept {
         return views[static_cast<size_t>(handle_type)];
@@ -294,8 +294,8 @@ public:
 
 private:
     struct StorageViews {
-        std::array<GLuint, Shader::NUM_TEXTURE_TYPES> signeds{};
-        std::array<GLuint, Shader::NUM_TEXTURE_TYPES> unsigneds{};
+        std::array<std::array<GLuint, Shader::NUM_TEXTURE_TYPES>,
+                   static_cast<size_t>(Shader::ImageFormat::R32G32B32A32_UINT) + 1> formats{};
     };
 
     void SetupView(Shader::TextureType view_type);

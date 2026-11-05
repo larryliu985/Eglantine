@@ -67,6 +67,7 @@ TEST_CASE("CoreTiming[BasicOrder]", "[core]") {
     };
 
     expected_callback = 0;
+    callbacks_ran_flags.reset();
 
     core_timing.SyncPause(true);
 
@@ -110,6 +111,7 @@ TEST_CASE("CoreTiming[BasicOrderNoPausing]", "[core]") {
     core_timing.SyncPause(false);
 
     expected_callback = 0;
+    callbacks_ran_flags.reset();
 
     const u64 start = core_timing.GetGlobalTimeNs().count();
     const u64 one_micro = 1000U;

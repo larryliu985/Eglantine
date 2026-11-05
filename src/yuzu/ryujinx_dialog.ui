@@ -23,9 +23,9 @@
       </sizepolicy>
      </property>
      <property name="text">
-      <string>Linking save data to Ryujinx lets both Ryujinx and Eglantine reference the same save files for your games.
+      <string>Linking save data to Ryujinx lets both Ryujinx and Lichii reference the same save files for your games.
 
-By selecting &quot;From Eglantine&quot;, previous save data stored in Ryujinx will be deleted, and vice versa for &quot;From Ryujinx&quot;.</string>
+By selecting &quot;From Lichii&quot;, previous save data stored in Ryujinx will be deleted, and vice versa for &quot;From Ryujinx&quot;.</string>
      </property>
      <property name="wordWrap">
       <bool>true</bool>
@@ -37,7 +37,7 @@ By selecting &quot;From Eglantine&quot;, previous save data stored in Ryujinx wi
      <item>
       <widget class="QPushButton" name="eden">
        <property name="text">
-      <string>From Eglantine</string>
+      <string>From Lichii</string>
        </property>
       </widget>
      </item>

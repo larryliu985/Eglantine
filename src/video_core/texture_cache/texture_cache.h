@@ -18,6 +18,7 @@
 #include <boost/container/small_vector.hpp>
 
 #include "common/alignment.h"
+#include "common/scope_exit.h"
 #include "common/settings.h"
 #include "common/slot_vector.h"
 #include "video_core/control/channel_state.h"
@@ -26,11 +27,13 @@
 #include "video_core/guest_memory.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/texture_cache/image_view_base.h"
+#include "video_core/texture_cache/conversion.h"
 #include "video_core/texture_cache/samples_helper.h"
 #include "video_core/texture_cache/texture_cache_base.h"
 #include "video_core/texture_cache/util.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_profile.h"
+#include "video_core/render_trace.h"
 #include "video_core/textures/decoders.h"
 
 namespace VideoCommon {
@@ -510,6 +513,9 @@ void TextureCache<P>::FillImageViews(std::span<ImageViewInOut> views, bool compu
             if (blacklist) {
                 if (view.blacklist && view.id != NULL_IMAGE_VIEW_ID) {
                     const ImageViewBase& image_view = slot_image_views[view.id];
+                    if (image_view.image_id == NULL_IMAGE_ID) {
+                        continue;
+                    }
                     auto& image = slot_images[image_view.image_id];
                     has_blacklisted |= ScaleDown(image);
                     image.scale_rating = 0;
@@ -524,13 +530,29 @@ void TextureCache<P>::CheckFeedbackLoop(std::span<const ImageViewInOut> views) {
     if (!Settings::values.barrier_feedback_loops.GetValue()) {
         return;
     }
+    const auto& regs = maxwell3d->regs;
+    const bool writes_depth_stencil = regs.depth_write_enabled != 0 || regs.stencil_enable != 0;
+    const auto barrier = [&] {
+        if (feedback_depth_dirty) {
+            runtime.BarrierFeedbackLoop();
+            feedback_depth_dirty = false;
+        }
+    };
+    SCOPE_EXIT {
+        if (writes_depth_stencil) {
+            feedback_depth_dirty = true;
+        }
+    };
 
     if (render_targets_serial == last_feedback_loop_serial &&
         texture_bindings_serial == last_feedback_texture_serial) {
         if (last_feedback_loop_result) {
-            runtime.BarrierFeedbackLoop();
+            barrier();
         }
         return;
+    }
+    if (render_targets_serial != last_feedback_loop_serial) {
+        feedback_depth_dirty = true;
     }
 
     if (rt_active_mask == 0) {
@@ -579,8 +601,31 @@ void TextureCache<P>::CheckFeedbackLoop(std::span<const ImageViewInOut> views) {
     last_feedback_texture_serial = texture_bindings_serial;
     last_feedback_loop_result = requires_barrier;
     if (requires_barrier) {
-        runtime.BarrierFeedbackLoop();
+        barrier();
     }
+}
+
+template <class P>
+bool TextureCache<P>::SamplesRenderTarget(std::span<const ImageViewInOut> views) {
+    if (rt_active_mask == 0) {
+        return false;
+    }
+    const bool depth_active = (rt_active_mask & (1u << NUM_RT)) != 0;
+    for (const auto& view : views) {
+        if (!view.id) {
+            continue;
+        }
+        const ImageId image_id = slot_image_views[view.id].image_id;
+        if (depth_active && image_id == rt_depth_image_id) {
+            return true;
+        }
+        for (size_t i = 0; i < NUM_RT; ++i) {
+            if ((rt_active_mask & (1u << i)) != 0 && image_id == rt_image_id[i]) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 template <class P>
@@ -1189,7 +1234,8 @@ bool TextureCache<P>::TemporalUpscale(const Tegra::Engines::Fermi2D::Surface& ds
                                       const Tegra::Engines::Fermi2D::Surface& src,
                                       const Tegra::Engines::Fermi2D::Surface& motion_vectors,
                                       const Tegra::Texture::TICEntry* depth,
-                                      std::array<f32, 2> jitter, std::array<f32, 2> motion_scale) {
+                                      std::array<f32, 2> jitter, std::array<f32, 2> motion_scale,
+                                      bool use_history) {
     if constexpr (FRAMEBUFFER_BLITS) {
         return false;
     } else {
@@ -1210,18 +1256,22 @@ bool TextureCache<P>::TemporalUpscale(const Tegra::Engines::Fermi2D::Surface& ds
         if (!result) {
             return false;
         }
-        const ImageInfo motion_info(motion_vectors);
+        const auto& motion_surface = use_history ? motion_vectors : src;
+        const ImageInfo motion_info(motion_surface);
         has_deleted_images = false;
         const ImageId motion_id =
-            FindOrInsertImage(motion_info, motion_vectors.Address(), RelaxedOptions{});
+            FindOrInsertImage(motion_info, motion_surface.Address(), RelaxedOptions{});
         // The depth only feeds NVIDIA DLSS and FSR 3.1 (looked up only when they can run); without
         // it the stand-in runs.
         ImageId depth_id{};
-        if (depth && motion_id && runtime.WantsTemporalUpscaleDepth()) {
+        if (use_history && depth && motion_id && runtime.WantsTemporalUpscaleDepth()) {
             depth_id = FindOrInsertImage(ImageInfo(*depth), depth->Address(), RelaxedOptions{});
+            if (!depth_id) {
+                return false;
+            }
         }
         if (has_deleted_images || !motion_id) {
-            return false; // the colour and output ids may be stale; the caller blits instead
+            return false;
         }
         const ImageId dst_id = result->dst_id;
         const ImageId src_id = result->src_id;
@@ -1232,7 +1282,7 @@ bool TextureCache<P>::TemporalUpscale(const Tegra::Engines::Fermi2D::Surface& ds
             PrepareImage(depth_id, false, false);
             if (slot_images[depth_id].info.num_samples != 1 ||
                 slot_images[depth_id].info.format != PixelFormat::D32_FLOAT) {
-                depth_id = {};
+                return false;
             }
         }
         for (const ImageId id : {src_id, motion_id, dst_id}) {
@@ -1256,9 +1306,12 @@ bool TextureCache<P>::TemporalUpscale(const Tegra::Engines::Fermi2D::Surface& ds
         // FSR 3.1 reads colour, motion and depth texel for texel: all at the colour's scale.
         if (depth_id && (rescaled(depth_id) != rescaled(src_id) ||
                          rescaled(motion_id) != rescaled(src_id))) {
-            depth_id = {};
+            return false;
         }
         const Extent3D src_size = slot_images[src_id].info.size;
+        if (src_size.width != src.width || src_size.height != src.height) {
+            return false;
+        }
         const std::array<u32, 2> render_size =
             rescaled(src_id)
                 ? std::array{Settings::values.resolution_info.ScaleUp(src_size.width),
@@ -1279,7 +1332,7 @@ bool TextureCache<P>::TemporalUpscale(const Tegra::Engines::Fermi2D::Surface& ds
             return RenderTargetFromImage(id, ImageViewInfo(ImageViewType::e2D, format, range));
         };
         const auto src_view = view(src_id, src, result->src_format);
-        const auto motion_view = view(motion_id, motion_vectors, motion_info.format);
+        const auto motion_view = view(motion_id, motion_surface, motion_info.format);
         const auto dst_view = view(dst_id, dst, result->dst_format);
         if (!src_view || !motion_view || !dst_view) {
             return false;
@@ -1291,6 +1344,9 @@ bool TextureCache<P>::TemporalUpscale(const Tegra::Engines::Fermi2D::Surface& ds
                 depth_view = FindOrEmplaceImageView(
                     depth_id, ImageViewInfo(ImageViewType::e2D, PixelFormat::D32_FLOAT, range));
             }
+            if (!depth_view) {
+                return false;
+            }
         }
         // After the views: creating them may reallocate the framebuffer slots.
         Framebuffer* const dst_framebuffer = &slot_framebuffers[dst_view->first];
@@ -1298,7 +1354,7 @@ bool TextureCache<P>::TemporalUpscale(const Tegra::Engines::Fermi2D::Surface& ds
             dst_framebuffer, slot_image_views[dst_view->second], slot_image_views[src_view->second],
             slot_image_views[motion_view->second],
             depth_view ? &slot_image_views[depth_view] : nullptr, render_size, jitter,
-            motion_scale);
+            motion_scale, use_history);
     }
 }
 
@@ -2041,6 +2097,19 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging) 
 template <class P>
 ImageViewId TextureCache<P>::CreateImageView(const TICEntry& raw_config) {
     const bool native = gpu_memory->UsesNativeTiling();
+    if (native && raw_config.format.Value() == Tegra::Texture::TextureFormat{} &&
+        RenderTrace::Enabled()) {
+        static u32 traces{};
+        if (traces++ < 64) {
+            LOG_WARNING(HW_GPU,
+                        "Zero-format image TIC: image={:#x} size={}x{}x{} header={} type={} "
+                        "raw={:016x}/{:016x}/{:016x}/{:016x}",
+                        raw_config.Address(), raw_config.Width(), raw_config.Height(),
+                        raw_config.Depth(), static_cast<u32>(raw_config.header_version.Value()),
+                        static_cast<u32>(raw_config.texture_type.Value()), raw_config.raw[0],
+                        raw_config.raw[1], raw_config.raw[2], raw_config.raw[3]);
+        }
+    }
     if (native && raw_config.BaseLayer() && NativeDrawDiagnostics()) {
         static u32 texture_view_traces{};
         if (texture_view_traces++ < 8) {
@@ -2190,8 +2259,8 @@ void TextureCache<P>::InvalidateScale(Image& image) {
 
 #ifndef NDEBUG
         if constexpr (ENABLE_VALIDATION) {
-            std::ranges::fill(channel_info.graphics_image_table.bound_ids, CORRUPT_ID);
-            std::ranges::fill(channel_info.compute_image_table.bound_ids, CORRUPT_ID);
+            std::ranges::fill(channel_info.graphics_image_table.LiveBoundIds(), CORRUPT_ID);
+            std::ranges::fill(channel_info.compute_image_table.LiveBoundIds(), CORRUPT_ID);
         }
 #endif
         channel_info.graphics_image_table.Invalidate();
@@ -2907,6 +2976,14 @@ ImageViewId TextureCache<P>::FindDepthBuffer() {
 
 template <class P>
 ImageViewId TextureCache<P>::FindRenderTargetView(const ImageInfo& info, GPUVAddr gpu_addr) {
+    static constexpr u32 MaxRenderTargetSize = 32768;
+    static constexpr s32 MaxRenderTargetLayers = 2048;
+    if (info.size.width == 0 || info.size.height == 0 || info.size.width > MaxRenderTargetSize ||
+        info.size.height > MaxRenderTargetSize || info.resources.layers > MaxRenderTargetLayers) {
+        LOG_ERROR(HW_GPU, "Ignoring {}x{} render target with {} layers at {:#x}", info.size.width,
+                  info.size.height, info.resources.layers, gpu_addr);
+        return ImageViewId{};
+    }
     ImageId image_id{};
     bool delete_state = has_deleted_images;
     do {
@@ -2927,6 +3004,18 @@ ImageViewId TextureCache<P>::FindRenderTargetView(const ImageInfo& info, GPUVAdd
         base = image.TryFindBase(gpu_addr).value();
     }
     const s32 layers = image.info.type == ImageType::e3D ? info.size.depth : info.resources.layers;
+    if (RenderTrace::SampleFrame(frame_tick)) {
+        LOG_DEBUG(HW_GPU,
+                  "Render trace target match: docked={} requested={:#x} {}x{} layers={} format={} "
+                  "stride={} block={}/{}/{} selected={:#x} {}x{} layers={} format={} stride={} "
+                  "block={}/{}/{} base_level={} base_layer={} aliases={} overlaps={}",
+                  Settings::IsDockedMode(), gpu_addr, info.size.width, info.size.height, layers,
+                  info.format, info.layer_stride, info.block.width, info.block.height,
+                  info.block.depth, image.gpu_addr, image.info.size.width, image.info.size.height,
+                  image.info.resources.layers, image.info.format, image.info.layer_stride,
+                  image.info.block.width, image.info.block.height, image.info.block.depth,
+                  base.level, base.layer, image.aliased_images.size(), image.overlapping_images.size());
+    }
     if (True(image.flags & ImageFlagBits::Unbacked)) {
         static u32 logged{};
         if (logged++ < 64) {
@@ -3399,8 +3488,8 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
         auto& channel_info = channel_storage[c];
 #ifndef NDEBUG
         if constexpr (ENABLE_VALIDATION) {
-            std::ranges::fill(channel_info.graphics_image_table.bound_ids, CORRUPT_ID);
-            std::ranges::fill(channel_info.compute_image_table.bound_ids, CORRUPT_ID);
+            std::ranges::fill(channel_info.graphics_image_table.LiveBoundIds(), CORRUPT_ID);
+            std::ranges::fill(channel_info.compute_image_table.LiveBoundIds(), CORRUPT_ID);
         }
 #endif
         channel_info.graphics_image_table.Invalidate();
@@ -3621,7 +3710,7 @@ void TextureCache<P>::CopyImage(ImageId dst_id, ImageId src_id, std::vector<Imag
     if (runtime.ShouldReinterpret(dst, src)) {
         return runtime.ReinterpretImage(dst, src, copies);
     }
-    for (const ImageCopy& copy : copies) {
+    for (const ImageCopy& copy : MakeImageCopyLayers(copies)) {
         UNIMPLEMENTED_IF(copy.dst_subresource.num_layers != 1);
         UNIMPLEMENTED_IF(copy.src_subresource.num_layers != 1);
         UNIMPLEMENTED_IF(copy.src_offset != Offset3D{});
@@ -3639,14 +3728,15 @@ void TextureCache<P>::CopyImage(ImageId dst_id, ImageId src_id, std::vector<Imag
         const SubresourceExtent src_extent{.levels = 1, .layers = 1};
         const SubresourceRange dst_range{.base = dst_base, .extent = dst_extent};
         const SubresourceRange src_range{.base = src_base, .extent = src_extent};
-        PixelFormat dst_format = dst.info.format;
+        PixelFormat dst_format = GetAliasConversionFormat(dst.info.format, src.info.format);
+        const PixelFormat src_format = GetAliasConversionFormat(src.info.format, dst.info.format);
         if (GetFormatType(src.info.format) == SurfaceType::DepthStencil &&
             GetFormatType(dst_format) == SurfaceType::ColorTexture &&
             BytesPerBlock(dst_format) == 4) {
             dst_format = PixelFormat::A8B8G8R8_UNORM;
         }
         const ImageViewInfo dst_view_info(ImageViewType::e2D, dst_format, dst_range);
-        const ImageViewInfo src_view_info(ImageViewType::e2D, src.info.format, src_range);
+        const ImageViewInfo src_view_info(ImageViewType::e2D, src_format, src_range);
         const auto [dst_framebuffer_id, dst_view_id] = RenderTargetFromImage(dst_id, dst_view_info);
         Framebuffer* const dst_framebuffer = &slot_framebuffers[dst_framebuffer_id];
         const ImageViewId src_view_id = FindOrEmplaceImageView(src_id, src_view_info);

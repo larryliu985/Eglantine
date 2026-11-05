@@ -74,14 +74,9 @@ std::unique_ptr<FileSys::NACP> BuildNacp(const NupContainer::PackageInfo& base,
         CopyNameToEntry(nacp->raw.language_entries.language_entries[0], effective_title);
     }
     if (!base.publisher.empty()) {
-        CopyDeveloperToEntry(nacp->raw.language_entries.language_entries[0], base.publisher);
-    }
-    if (!base.publisher.empty()) {
-        auto& entry = nacp->raw.language_entries.language_entries[0];
-        const std::size_t length =
-            std::min(base.publisher.size(), entry.developer_name.size() - 1);
-        std::memcpy(entry.developer_name.data(), base.publisher.data(), length);
-        entry.developer_name[length] = '\0';
+        for (auto& entry : nacp->raw.language_entries.language_entries) {
+            CopyDeveloperToEntry(entry, base.publisher);
+        }
     }
     if (!version.empty()) {
         const std::size_t length = std::min(version.size(), nacp->raw.version_string.size() - 1);
@@ -136,6 +131,7 @@ AppLoader_NUP::AppLoader_NUP(FileSys::VirtualFile file_)
 
     const auto& program = nup->GetPackages()[*program_index];
     base_title_id = program.title_id;
+    display_title = program.title_name;
     has_program = true;
 
     const auto exefs = nup->GetExeFSDir(*exefs_index);
@@ -270,6 +266,10 @@ ResultStatus AppLoader_NUP::ReadIcon(std::vector<u8>& buffer) {
 }
 
 ResultStatus AppLoader_NUP::ReadTitle(std::string& title) {
+    if (!display_title.empty()) {
+        title = display_title;
+        return ResultStatus::Success;
+    }
     if (nacp_file == nullptr) {
         return ResultStatus::ErrorNoControl;
     }

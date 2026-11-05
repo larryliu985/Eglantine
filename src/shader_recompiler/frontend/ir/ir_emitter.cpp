@@ -429,32 +429,32 @@ U32 IREmitter::LaneId() {
     return Inst<U32>(Opcode::LaneId);
 }
 
-U32 IREmitter::LoadGlobalU8(const U64& address) {
-    return Inst<U32>(Opcode::LoadGlobalU8, address);
+U32 IREmitter::LoadGlobalU8(const U64& address, bool coherent) {
+    return Inst<U32>(Opcode::LoadGlobalU8, Flags{coherent}, address);
 }
 
-U32 IREmitter::LoadGlobalS8(const U64& address) {
-    return Inst<U32>(Opcode::LoadGlobalS8, address);
+U32 IREmitter::LoadGlobalS8(const U64& address, bool coherent) {
+    return Inst<U32>(Opcode::LoadGlobalS8, Flags{coherent}, address);
 }
 
-U32 IREmitter::LoadGlobalU16(const U64& address) {
-    return Inst<U32>(Opcode::LoadGlobalU16, address);
+U32 IREmitter::LoadGlobalU16(const U64& address, bool coherent) {
+    return Inst<U32>(Opcode::LoadGlobalU16, Flags{coherent}, address);
 }
 
-U32 IREmitter::LoadGlobalS16(const U64& address) {
-    return Inst<U32>(Opcode::LoadGlobalS16, address);
+U32 IREmitter::LoadGlobalS16(const U64& address, bool coherent) {
+    return Inst<U32>(Opcode::LoadGlobalS16, Flags{coherent}, address);
 }
 
-U32 IREmitter::LoadGlobal32(const U64& address) {
-    return Inst<U32>(Opcode::LoadGlobal32, address);
+U32 IREmitter::LoadGlobal32(const U64& address, bool coherent) {
+    return Inst<U32>(Opcode::LoadGlobal32, Flags{coherent}, address);
 }
 
-Value IREmitter::LoadGlobal64(const U64& address) {
-    return Inst<Value>(Opcode::LoadGlobal64, address);
+Value IREmitter::LoadGlobal64(const U64& address, bool coherent) {
+    return Inst<Value>(Opcode::LoadGlobal64, Flags{coherent}, address);
 }
 
-Value IREmitter::LoadGlobal128(const U64& address) {
-    return Inst<Value>(Opcode::LoadGlobal128, address);
+Value IREmitter::LoadGlobal128(const U64& address, bool coherent) {
+    return Inst<Value>(Opcode::LoadGlobal128, Flags{coherent}, address);
 }
 
 void IREmitter::WriteGlobalU8(const U64& address, const U32& value) {
@@ -569,6 +569,16 @@ F16F32F64 IREmitter::FPAdd(const F16F32F64& a, const F16F32F64& b, FpControl con
     default:
         ThrowInvalidType(a.Type());
     }
+}
+
+Value IREmitter::TensorMulAdd(const Value& a, const Value& b, const Value& c, u32 depth) {
+    if (a.Type() != Type::U32x4 || b.Type() != Type::U32x2 || c.Type() != Type::U32x2 ||
+        (depth != 8 && depth != 16)) {
+        throw InvalidArgument("Invalid software matrix operands");
+    }
+    const Value result = Inst(Opcode::TensorMulAdd, a, b, c);
+    result.Inst()->SetFlags<u32>(depth);
+    return result;
 }
 
 Value IREmitter::CompositeConstruct(const Value& e1, const Value& e2) {

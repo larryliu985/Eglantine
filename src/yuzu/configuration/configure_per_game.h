@@ -6,13 +6,16 @@
 
 #pragma once
 
+#include <atomic>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include <QDialog>
+#include <QFutureWatcher>
 #include <QList>
-
+#include <QPixmap>
 #include "configuration/shared_widget.h"
 #include "core/file_sys/vfs/vfs_types.h"
 #include "frontend_common/config.h"
@@ -66,16 +69,34 @@ public:
     void LoadFromFile(FileSys::VirtualFile file_);
 
 private:
+    void done(int result) override;
     void changeEvent(QEvent* event) override;
     void RetranslateUI();
 
     void HandleApplyButtonClicked();
 
     void LoadConfiguration();
+    void UpdateIconPreview(const QPixmap& map);
+    void OnUploadNupIcon();
+    void OnDetectNupIcon();
+    bool SaveNupMetadata(bool show_error = false);
+
+    struct DetectIconResult {
+        std::vector<u8> icon_bytes;
+        std::string resolved_title;
+        std::string error;
+    };
 
     std::unique_ptr<Ui::ConfigurePerGame> ui;
     FileSys::VirtualFile file;
+    std::filesystem::path file_path;
     u64 title_id;
+    bool is_nup_file{false};
+    std::string initial_nup_title;
+    std::vector<u8> pending_nup_icon;
+    bool nup_icon_modified{false};
+    QFutureWatcher<DetectIconResult> detect_watcher;
+    std::shared_ptr<std::atomic_bool> detect_cancel;
 
     QGraphicsScene* scene;
 

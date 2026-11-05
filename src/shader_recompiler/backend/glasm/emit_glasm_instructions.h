@@ -679,4 +679,7 @@ void EmitDPdyFine(EmitContext& ctx, IR::Inst& inst, ScalarF32 op_a);
 void EmitDPdxCoarse(EmitContext& ctx, IR::Inst& inst, ScalarF32 op_a);
 void EmitDPdyCoarse(EmitContext& ctx, IR::Inst& inst, ScalarF32 op_a);
 
+void EmitTensorMulAdd(EmitContext& ctx, IR::Inst& inst, const IR::Value& a,
+                      const IR::Value& b, const IR::Value& c);
+
 } // namespace Shader::Backend::GLASM

@@ -9,7 +9,7 @@
 #include <sirit/sirit.h>
 #include <sys/stat.h>
 
-int ReferenceImpl(int argc, char *argv[]) {
+int SpirvReferenceImpl(int argc, char *argv[]) {
     //todo
     return EXIT_SUCCESS;
 }

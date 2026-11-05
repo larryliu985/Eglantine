@@ -14,6 +14,8 @@
 #include "common/bit_util.h"
 #include "common/literals.h"
 #include "common/settings.h"
+#include "shader_recompiler/byte_addressed_image.h"
+#include "shader_recompiler/exception.h"
 #include "video_core/renderer_opengl/gl_device.h"
 #include "video_core/renderer_opengl/gl_shader_manager.h"
 #include "video_core/renderer_opengl/gl_state_tracker.h"
@@ -1211,14 +1213,25 @@ ImageView::ImageView(TextureCacheRuntime& runtime, const VideoCommon::NullImageV
 
 ImageView::~ImageView() = default;
 
-GLuint ImageView::StorageView(Shader::TextureType texture_type, Shader::ImageFormat image_format) {
+GLuint ImageView::StorageView(Shader::TextureType texture_type, Shader::ImageFormat image_format,
+                              bool is_byte_addressed) {
+    if (is_byte_addressed &&
+        (texture_type != Shader::TextureType::Color2D ||
+         image_format != Shader::ImageFormat::R32_UINT ||
+         !Shader::IsByteAddressed32BitColorFormat(static_cast<Shader::TexturePixelFormat>(format)) ||
+         (type != VideoCommon::ImageViewType::e2D && type != VideoCommon::ImageViewType::Rect) ||
+         num_samples != 1 || range.extent.layers != 1 || range.extent.levels != 1 ||
+         size.depth != 1 || size.width == 0 || size.height == 0)) {
+        throw Shader::RuntimeError("Unsupported byte-addressed B32 image binding: format {} type {} "
+                                   "samples {} layers {} levels {} size {}x{}x{}",
+                                   format, type, num_samples, range.extent.layers,
+                                   range.extent.levels, size.width, size.height, size.depth);
+    }
     if (image_format == Shader::ImageFormat::Typeless)
         return Handle(texture_type);
-    const bool is_signed = image_format == Shader::ImageFormat::R8_SINT
-        || image_format == Shader::ImageFormat::R16_SINT;
     if (!storage_views)
         storage_views = {OpenGL::ImageView::StorageViews{}};
-    auto& type_views{is_signed ? storage_views->signeds : storage_views->unsigneds};
+    auto& type_views{storage_views->formats[static_cast<size_t>(image_format)]};
     GLuint& view{type_views[size_t(texture_type)]};
     if (view == 0)
         view = MakeView(texture_type, ShaderFormat(image_format));

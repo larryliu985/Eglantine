@@ -8,10 +8,15 @@
 #pragma once
 
 #include <optional>
+#include <span>
+#include <string_view>
 #include "common/net/net.h"
 
 namespace UpdateChecker {
 
 std::optional<Common::Net::Release> GetUpdate();
+std::optional<Common::Net::Release> SelectUpdate(std::span<const Common::Net::Release> releases,
+                                                 std::string_view build_tag,
+                                                 std::string_view platform);
 
 } // namespace UpdateChecker

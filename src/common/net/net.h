@@ -5,6 +5,7 @@
 
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <nlohmann/json.hpp>
 #include "common/common_types.h"
@@ -34,6 +35,7 @@ struct Release {
 
     // Get the relevant list of assets for the current platform.
     std::vector<Asset> GetPlatformAssets() const;
+    std::vector<Asset> GetPlatformAssets(std::string_view platform) const;
 
     static std::optional<Release> FromJson(const nlohmann::json& json, const std::string &host, const std::string& repo);
     static std::optional<Release> FromJson(const std::string_view& json, const std::string &host, const std::string& repo);
@@ -44,13 +46,10 @@ struct Release {
 // Make a request via httplib, and return the response body if applicable.
 std::optional<std::string> MakeRequest(const std::string &url, const std::string &path);
 
-// Get all of the latest stable releases.
+// Get the latest releases, including prereleases.
 std::vector<Release> GetReleases();
 
-// Get all of the latest stable releases as text.
+// Get the latest releases as text.
 std::optional<std::string> GetReleasesBody();
-
-// Get the latest release of the current channel.
-std::optional<Release> GetLatestRelease();
 
 }

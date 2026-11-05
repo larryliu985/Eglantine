@@ -127,6 +127,10 @@ Result ISystemDisplayService::GetDisplayMode(Out<DisplayMode> out_display_mode, 
     out_display_mode->refresh_rate = 60.f; // This wouldn't seem to be correct for 30 fps games.
     out_display_mode->unknown = 0;
 
+    LOG_DEBUG(Service_VI, "Display mode: docked={} resolution={}x{} refresh={}",
+              Settings::IsDockedMode(), out_display_mode->width, out_display_mode->height,
+              out_display_mode->refresh_rate);
+
     R_SUCCEED();
 }
 

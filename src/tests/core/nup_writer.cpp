@@ -875,3 +875,27 @@ TEST_CASE("NUP edits localized titles and keeps the rest", "[nup]") {
     REQUIRE(nup.GetPackages()[0].localized_titles.empty());
     REQUIRE(nup.GetPackages()[0].title_name == "Renamed");
 }
+
+TEST_CASE("NUP UpdateMetadata updates title name and icon in metadata", "[nup]") {
+    TempDir t;
+    const auto root = t.path / "Game";
+    MakeDump(root);
+    const auto archive = t.path / "Game.nup";
+    REQUIRE(FileSys::Nup::PackDump(root, archive) == FileSys::Nup::PackResult::Success);
+
+    const std::vector<u8> fake_icon{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A};
+    std::string error;
+    REQUIRE(FileSys::Nup::UpdateMetadata(
+                archive, {.title_name = std::string{"Mario Kart World"}, .icon = fake_icon},
+                &error) == FileSys::Nup::PackResult::Success);
+    INFO(error);
+    REQUIRE_FALSE(fs::exists(archive.string() + ".meta.part"));
+
+    FileSys::RealVfsFilesystem real;
+    NupContainer nup{real.OpenFile(archive.string(), FileSys::OpenMode::Read)};
+    REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+    REQUIRE(nup.VerifyIntegrity({}) == Loader::ResultStatus::Success);
+    REQUIRE(nup.GetPackages()[0].title_name == "Mario Kart World");
+    REQUIRE(nup.GetPackages()[0].icon == fake_icon);
+    REQUIRE(PackedTree(nup.GetRomFSDir(0)) == SourceTree(root / "Base/RomFS"));
+}

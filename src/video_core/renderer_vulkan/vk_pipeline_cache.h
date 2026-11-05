@@ -15,6 +15,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <memory>
+#include <string>
 #include <type_traits>
 #include "common/container/unordered_map.h"
 #include <vector>
@@ -105,6 +106,14 @@ struct ShaderPools {
     Shader::ObjectPool<Shader::Maxwell::Flow::Block> flow_block{32};
 };
 
+struct ComputePipelineCacheEntry {
+    std::unique_ptr<ComputePipeline> pipeline;
+    std::string failure;
+
+    [[nodiscard]] ComputePipeline* Get(bool native, GPUVAddr address,
+                                       const ComputePipelineCacheKey& key) const;
+};
+
 class PipelineCache : public VideoCommon::ShaderCache {
 public:
     explicit PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_, const Device& device,
@@ -116,7 +125,6 @@ public:
     ~PipelineCache();
 
     [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipeline();
-    [[nodiscard]] bool IsIndirectResetShader() const;
 
     void TickFrame();
 
@@ -137,14 +145,14 @@ private:
         std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,
         bool build_in_parallel);
 
-    std::unique_ptr<ComputePipeline> CreateComputePipeline(const ComputePipelineCacheKey& key,
-                                                           const ShaderInfo* shader);
+    ComputePipelineCacheEntry CreateComputePipeline(const ComputePipelineCacheKey& key,
+                                                     const ShaderInfo* shader);
 
-    std::unique_ptr<ComputePipeline> CreateComputePipeline(ShaderPools& pools,
-                                                           const ComputePipelineCacheKey& key,
-                                                           Shader::Environment& env,
-                                                           PipelineStatistics* statistics,
-                                                           bool build_in_parallel);
+    ComputePipelineCacheEntry CreateComputePipeline(ShaderPools& pools,
+                                                     const ComputePipelineCacheKey& key,
+                                                     Shader::Environment& env,
+                                                     PipelineStatistics* statistics,
+                                                     bool build_in_parallel);
 
     void SerializeVulkanPipelineCache(const std::filesystem::path& filename,
                                       const vk::PipelineCache& pipeline_cache, u32 cache_version);
@@ -175,7 +183,7 @@ private:
     std::deque<std::pair<u64, std::unique_ptr<GraphicsPipeline>>> evicted_pipelines; ///< (tick, pipeline)
     std::unordered_set<u64> used_and_evicted; ///< Key hashes of pipelines used this session, evicted since
 
-    ::Common::unordered_map<ComputePipelineCacheKey, std::unique_ptr<ComputePipeline>> compute_cache;
+    ::Common::unordered_map<ComputePipelineCacheKey, ComputePipelineCacheEntry> compute_cache;
     ::Common::unordered_map<GraphicsPipelineCacheKey, std::unique_ptr<GraphicsPipeline>> graphics_cache;
 
     ShaderPools main_pools;

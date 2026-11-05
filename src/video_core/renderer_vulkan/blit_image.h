@@ -125,6 +125,10 @@ public:
 
     void ConvertABGR8ToD24S8(const Framebuffer* dst_framebuffer, const ImageView& src_image_view);
 
+    void ConvertABGR8ToX8D24(const Framebuffer* dst_framebuffer, const ImageView& src_image_view);
+
+    void ConvertX8D24ToABGR8(const Framebuffer* dst_framebuffer, const ImageView& src_image_view);
+
     void ConvertABGR8ToD32F(const Framebuffer* dst_framebuffer, const ImageView& src_image_view);
 
     void ConvertD32FToABGR8(const Framebuffer* dst_framebuffer, ImageView& src_image_view);
@@ -187,7 +191,6 @@ private:
     [[nodiscard]] VkPipeline FindOrEmplaceColorPipeline(const BlitImagePipelineKey& key);
 
     [[nodiscard]] VkPipeline FindOrEmplaceTemporalUpscalePipeline(VkRenderPass renderpass);
-
     [[nodiscard]] VkPipeline FindOrEmplaceTemporalSharpenPipeline(VkRenderPass renderpass);
 
     [[nodiscard]] VkPipeline FindOrEmplaceDepthStencilPipeline(const BlitImagePipelineKey& key);
@@ -254,6 +257,8 @@ private:
     vk::ShaderModule convert_depth_to_float_frag;
     vk::ShaderModule convert_float_to_depth_frag;
     vk::ShaderModule convert_abgr8_to_d24s8_frag;
+    vk::ShaderModule convert_abgr8_to_x8d24_frag;
+    vk::ShaderModule convert_x8d24_to_abgr8_frag;
     vk::ShaderModule convert_abgr8_to_d32f_frag;
     vk::ShaderModule convert_d32f_to_abgr8_frag;
     vk::ShaderModule convert_d24s8_to_abgr8_frag;
@@ -313,6 +318,8 @@ private:
     vk::Pipeline convert_d16_to_r16_pipeline;
     vk::Pipeline convert_r16_to_d16_pipeline;
     vk::Pipeline convert_abgr8_to_d24s8_pipeline;
+    vk::Pipeline convert_abgr8_to_x8d24_pipeline;
+    vk::Pipeline convert_x8d24_to_abgr8_pipeline;
     vk::Pipeline convert_abgr8_to_d32f_pipeline;
     vk::Pipeline convert_d32f_to_abgr8_pipeline;
     vk::Pipeline convert_d24s8_to_abgr8_pipeline;

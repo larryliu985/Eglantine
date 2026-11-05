@@ -17,6 +17,7 @@
 #include "common/div_ceil.h"
 #include "shader_recompiler/backend/nvn_storage_descriptor.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
+#include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
 
 namespace Shader::Backend::SPIRV {
@@ -312,6 +313,9 @@ void DefineSsbos(EmitContext& ctx, StorageTypeDefinition& type_def,
     const Id struct_type{ctx.TypeStruct(array_type)};
     ctx.Decorate(struct_type, spv::Decoration::Block);
     ctx.MemberDecorate(struct_type, 0, spv::Decoration::Offset, 0U);
+    if (info.requires_coherent_global_memory) {
+        ctx.MemberDecorate(struct_type, 0, spv::Decoration::Coherent);
+    }
 
     const Id struct_pointer{ctx.TypePointer(spv::StorageClass::StorageBuffer, struct_type)};
     type_def.array = struct_pointer;
@@ -469,6 +473,8 @@ void VectorTypes::Define(Sirit::Module& sirit_ctx, Id base_type, std::string_vie
 EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_info_,
                          IR::Program& program, Bindings& bindings)
     : Sirit::Module(profile_.supported_spirv), profile{profile_}, runtime_info{runtime_info_},
+      requires_coherent_global_memory{program.info.requires_coherent_global_memory},
+      requires_coherent_image_memory{program.info.requires_coherent_image_memory},
       stage{program.stage}, texture_rescaling_index{bindings.texture_scaling_index},
       image_rescaling_index{bindings.image_scaling_index} {
     const bool is_unified{profile.unified_descriptor_binding};
@@ -493,7 +499,7 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineImages(program.info, image_binding, bindings.image_scaling_index);
     DefineAttributeMemAccess(program.info);
     DefineWriteStorageCasLoopFunction(program.info);
-    DefineGlobalMemoryFunctions(program.info);
+    DefineGlobalMemoryFunctions(program);
     DefineRescalingInput(program.info);
     DefineRenderArea(program.info);
 }
@@ -948,7 +954,8 @@ void EmitContext::DefineWriteStorageCasLoopFunction(const Info& info) {
     write_storage_cas_loop_func = func;
 }
 
-void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
+void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
+    const Info& info{program.info};
     if (!info.uses_global_memory || !profile.support_int64) {
         return;
     }
@@ -961,11 +968,35 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
         const u64 ssbo_align_mask{~(profile.min_ssbo_alignment - 1U)};
         const auto base_address{[&](size_t index) {
             const auto& ssbo{info.storage_buffers_descriptors[index]};
-            const Id ssbo_addr_pointer{OpAccessChain(uniform_types.U32x2,
-                                                     cbufs[ssbo.cbuf_index].U32x2, zero,
-                                                     Const(ssbo.cbuf_offset / 8))};
-            const Id unaligned_addr{OpBitcast(U64, OpLoad(U32[2], ssbo_addr_pointer))};
-            return OpBitwiseAnd(U64, unaligned_addr, Constant(U64, ssbo_align_mask));
+            const Id words{EmitGetCbufU32x2(*this, IR::Value{ssbo.cbuf_index},
+                                           IR::Value{ssbo.cbuf_offset})};
+            if (ssbo.indirect_offset == ~0U) {
+                return OpBitwiseAnd(U64, OpBitcast(U64, words), Constant(U64, ssbo_align_mask));
+            }
+            // The pointer is read through the buffer bound for the constant buffer pointer.
+            const auto holder{std::ranges::find_if(
+                info.storage_buffers_descriptors, [&ssbo](const auto& desc) {
+                    return desc.cbuf_index == ssbo.cbuf_index &&
+                           desc.cbuf_offset == ssbo.cbuf_offset && desc.indirect_offset == ~0U;
+                })};
+            if (holder == info.storage_buffers_descriptors.end()) {
+                return Constant(U64, ~u64{0});
+            }
+            const size_t holder_index{static_cast<size_t>(
+                std::distance(info.storage_buffers_descriptors.begin(), holder))};
+            const Id holder_low{OpCompositeExtract(U32[1], words, 0U)};
+            const Id byte{OpIAdd(U32[1],
+                                 OpBitwiseAnd(U32[1], holder_low,
+                                              Const(static_cast<u32>(profile.min_ssbo_alignment - 1))),
+                                 Const(ssbo.indirect_offset))};
+            const Id word_index{OpShiftRightLogical(U32[1], byte, Const(2U))};
+            const Id storage{ssbos[holder_index].U32};
+            const auto load_word{[&](Id word) {
+                return OpLoad(U32[1], OpAccessChain(storage_types.U32.element, storage, zero, word));
+            }};
+            const Id pointer_words{OpCompositeConstruct(
+                U32[2], load_word(word_index), load_word(OpIAdd(U32[1], word_index, Const(1U))))};
+            return OpBitwiseAnd(U64, OpBitcast(U64, pointer_words), Constant(U64, ssbo_align_mask));
         }};
         const auto access{[&](size_t index, Id ssbo_addr, Id cond) {
             const Id then_label{OpLabel()};
@@ -1005,11 +1036,10 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
                 continue;
             }
             const auto& ssbo{info.storage_buffers_descriptors[index]};
-            const Id ssbo_size_cbuf_offset{Const(ssbo.cbuf_offset / 4 + 2)};
-            const Id ssbo_size_pointer{OpAccessChain(uniform_types.U32, cbufs[ssbo.cbuf_index].U32,
-                                                     zero, ssbo_size_cbuf_offset)};
             const Id ssbo_addr{base_address(index)};
-            const Id ssbo_size{OpUConvert(U64, OpLoad(U32[1], ssbo_size_pointer))};
+            const Id size{EmitGetCbufU32(*this, IR::Value{ssbo.cbuf_index},
+                                       IR::Value{ssbo.cbuf_offset + 8})};
+            const Id ssbo_size{OpUConvert(U64, size)};
             const Id ssbo_end{OpIAdd(U64, ssbo_addr, ssbo_size)};
             const Id cond{OpLogicalAnd(U1, OpUGreaterThanEqual(U1, addr, ssbo_addr),
                                        OpULessThan(U1, addr, ssbo_end))};
@@ -1020,6 +1050,18 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
         const Id function_type{TypeFunction(type, U64)};
         const Id func_id{OpFunction(type, spv::FunctionControlMask::MaskNone, function_type)};
         const Id addr{OpFunctionParameter(U64)};
+        if (!profile.support_descriptor_aliasing && shift > 2) {
+            AddLabel();
+            std::array<Id, 4> words;
+            const u32 count = 1U << (shift - 2);
+            for (u32 i = 0; i < count; ++i) {
+                const Id word_address{OpIAdd(U64, addr, Constant(U64, i * sizeof(u32)))};
+                words[i] = OpFunctionCall(U32[1], load_global_func_u32, word_address);
+            }
+            OpReturnValue(OpCompositeConstruct(type, std::span{words}.first(count)));
+            OpFunctionEnd();
+            return func_id;
+        }
         define_body(ssbo_member, addr, element_pointer, shift,
                     [&](Id ssbo_pointer) { OpReturnValue(OpLoad(type, ssbo_pointer)); });
         OpReturnValue(ConstantNull(type));
@@ -1031,6 +1073,18 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
         const Id func_id{OpFunction(void_id, spv::FunctionControlMask::MaskNone, function_type)};
         const Id addr{OpFunctionParameter(U64)};
         const Id data{OpFunctionParameter(type)};
+        if (!profile.support_descriptor_aliasing && shift > 2) {
+            AddLabel();
+            const u32 count = 1U << (shift - 2);
+            for (u32 i = 0; i < count; ++i) {
+                const Id word_address{OpIAdd(U64, addr, Constant(U64, i * sizeof(u32)))};
+                const Id word{OpCompositeExtract(U32[1], data, i)};
+                OpFunctionCall(void_id, write_global_func_u32, word_address, word);
+            }
+            OpReturn();
+            OpFunctionEnd();
+            return func_id;
+        }
         define_body(ssbo_member, addr, element_pointer, shift, [&](Id ssbo_pointer) {
             OpStore(ssbo_pointer, data);
             OpReturn();
@@ -1053,6 +1107,39 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
         define(&StorageDefinitions::U32x2, storage_types.U32x2, U32[2], sizeof(u32[2]));
     std::tie(load_global_func_u32x4, write_global_func_u32x4) =
         define(&StorageDefinitions::U32x4, storage_types.U32x4, U32[4], sizeof(u32[4]));
+
+    if (!std::ranges::any_of(info.storage_buffers_descriptors, [&](const auto& descriptor) {
+            return info.native_global_bounds || UsesNvnStorageDescriptor(info, descriptor);
+        })) {
+        return;
+    }
+    for (const auto opcode : {IR::Opcode::GlobalAtomicIAdd32, IR::Opcode::GlobalAtomicUMax32}) {
+        if (!std::ranges::any_of(program.blocks, [opcode](const IR::Block* block) {
+                return std::ranges::any_of(block->Instructions(), [opcode](const IR::Inst& inst) {
+                    return inst.GetOpcode() == opcode;
+                });
+            })) {
+            continue;
+        }
+        const Id function_type{TypeFunction(U32[1], U64, U32[1])};
+        const Id function{OpFunction(U32[1], spv::FunctionControlMask::MaskNone, function_type)};
+        if (opcode == IR::Opcode::GlobalAtomicIAdd32) {
+            atomic_add_global_func_u32 = function;
+        } else {
+            atomic_umax_global_func_u32 = function;
+        }
+        const Id address{OpFunctionParameter(U64)};
+        const Id value{OpFunctionParameter(U32[1])};
+        const Id scope{Const(static_cast<u32>(spv::Scope::Device))};
+        define_body(&StorageDefinitions::U32, address, storage_types.U32.element, 2,
+                    [&](Id pointer) {
+                        OpReturnValue(opcode == IR::Opcode::GlobalAtomicIAdd32
+                                          ? OpAtomicIAdd(U32[1], pointer, scope, u32_zero_value, value)
+                                          : OpAtomicUMax(U32[1], pointer, scope, u32_zero_value, value));
+                    });
+        OpReturnValue(u32_zero_value);
+        OpFunctionEnd();
+    }
 }
 
 void EmitContext::DefineRescalingInput(const Info& info) {
@@ -1394,6 +1481,9 @@ void EmitContext::DefineImageBuffers(const Info& info, u32& binding) {
         Decorate(id, spv::Decoration::Binding, binding);
         Decorate(id, spv::Decoration::DescriptorSet, 0U);
         Name(id, NameOf(stage, desc, "imgbuf"));
+        if (info.requires_coherent_image_memory) {
+            Decorate(id, spv::Decoration::Coherent);
+        }
         image_buffers.push_back({
             .id = id,
             .image_type = image_type,
@@ -1449,6 +1539,9 @@ void EmitContext::DefineImages(const Info& info, u32& binding, u32& scaling_inde
         Decorate(id, spv::Decoration::Binding, binding);
         Decorate(id, spv::Decoration::DescriptorSet, 0U);
         Name(id, NameOf(stage, desc, "img"));
+        if (info.requires_coherent_image_memory) {
+            Decorate(id, spv::Decoration::Coherent);
+        }
         images.push_back({
             .id = id,
             .image_type = image_type,
@@ -1466,7 +1559,7 @@ void EmitContext::DefineImages(const Info& info, u32& binding, u32& scaling_inde
 
 void EmitContext::DefineInputs(const IR::Program& program) {
     const Info& info{program.info};
-    const VaryingState loads{info.loads.mask | info.passthrough.mask};
+    const VaryingState& loads{info.loads};
 
     if (info.uses_workgroup_id) {
         workgroup_id = DefineInput(*this, U32[3], false, spv::BuiltIn::WorkgroupId);
@@ -1526,6 +1619,8 @@ void EmitContext::DefineInputs(const IR::Program& program) {
     if (loads[IR::Attribute::PrimitiveId]) {
         primitive_id = DefineInput(*this, U32[1], false, spv::BuiltIn::PrimitiveId);
         if (stage == Stage::Fragment) {
+            // A fragment PrimitiveId input requires Geometry (geometryShader is a required feature).
+            AddCapability(spv::Capability::Geometry);
             Decorate(primitive_id, spv::Decoration::Flat);
         }
     }
@@ -1534,7 +1629,8 @@ void EmitContext::DefineInputs(const IR::Program& program) {
         layer = DefineInput(*this, U32[1], false, spv::BuiltIn::Layer);
         Decorate(layer, spv::Decoration::Flat);
     }
-    if (loads.AnyComponent(IR::Attribute::PositionX)) {
+    if (loads.AnyComponent(IR::Attribute::PositionX) ||
+        info.passthrough.AnyComponent(IR::Attribute::PositionX)) {
         const bool is_fragment{stage == Stage::Fragment};
         if (!is_fragment && profile.has_broken_spirv_position_input) {
             need_input_position_indirect = true;
@@ -1557,34 +1653,40 @@ void EmitContext::DefineInputs(const IR::Program& program) {
             }
         }
     }
+    // BaseInstance, BaseVertex and DrawIndex are only valid with the DrawParameters capability.
+    const auto define_draw_parameter{[this](spv::BuiltIn builtin) {
+        AddExtension("SPV_KHR_shader_draw_parameters");
+        AddCapability(spv::Capability::DrawParameters);
+        return DefineInput(*this, U32[1], true, builtin);
+    }};
     if (loads[IR::Attribute::InstanceId]) {
         if (profile.support_vertex_instance_id) {
             instance_id = DefineInput(*this, U32[1], true, spv::BuiltIn::InstanceId);
             if (loads[IR::Attribute::BaseInstance]) {
-                base_instance = DefineInput(*this, U32[1], true, spv::BuiltIn::BaseInstance);
+                base_instance = define_draw_parameter(spv::BuiltIn::BaseInstance);
             }
         } else {
             instance_index = DefineInput(*this, U32[1], true, spv::BuiltIn::InstanceIndex);
-            base_instance = DefineInput(*this, U32[1], true, spv::BuiltIn::BaseInstance);
+            base_instance = define_draw_parameter(spv::BuiltIn::BaseInstance);
         }
     } else if (loads[IR::Attribute::BaseInstance]) {
-        base_instance = DefineInput(*this, U32[1], true, spv::BuiltIn::BaseInstance);
+        base_instance = define_draw_parameter(spv::BuiltIn::BaseInstance);
     }
     if (loads[IR::Attribute::VertexId]) {
         if (profile.support_vertex_instance_id) {
             vertex_id = DefineInput(*this, U32[1], true, spv::BuiltIn::VertexId);
             if (loads[IR::Attribute::BaseVertex]) {
-                base_vertex = DefineInput(*this, U32[1], true, spv::BuiltIn::BaseVertex);
+                base_vertex = define_draw_parameter(spv::BuiltIn::BaseVertex);
             }
         } else {
             vertex_index = DefineInput(*this, U32[1], true, spv::BuiltIn::VertexIndex);
-            base_vertex = DefineInput(*this, U32[1], true, spv::BuiltIn::BaseVertex);
+            base_vertex = define_draw_parameter(spv::BuiltIn::BaseVertex);
         }
     } else if (loads[IR::Attribute::BaseVertex]) {
-        base_vertex = DefineInput(*this, U32[1], true, spv::BuiltIn::BaseVertex);
+        base_vertex = define_draw_parameter(spv::BuiltIn::BaseVertex);
     }
     if (loads[IR::Attribute::DrawID]) {
-        draw_index = DefineInput(*this, U32[1], true, spv::BuiltIn::DrawIndex);
+        draw_index = define_draw_parameter(spv::BuiltIn::DrawIndex);
     }
     if (loads[IR::Attribute::FrontFace]) {
         front_face = DefineInput(*this, U1, true, spv::BuiltIn::FrontFacing);
@@ -1601,7 +1703,7 @@ void EmitContext::DefineInputs(const IR::Program& program) {
         if (!runtime_info.previous_stage_stores.Generic(index)) {
             continue;
         }
-        if (!loads.Generic(index)) {
+        if (!loads.Generic(index) && !info.passthrough.Generic(index)) {
             continue;
         }
         if (input_type == AttributeType::Disabled) {

@@ -22,6 +22,10 @@ namespace Core::Memory {
 class Memory;
 }
 
+namespace Core::WindowTrace {
+class Session;
+}
+
 namespace Kernel {
 enum class DebugWatchpointType : u8;
 class KPRocess;
@@ -68,6 +72,7 @@ public:
     u64 m_last_cntpct{}; ///< The previous counter read (GetCNTPCT spin detection)
     u64 m_spin_ticks{32}; ///< Reads closer than this (~1.7 us) count as a polling loop
     Kernel::KProcess* m_process{};
+    std::shared_ptr<WindowTrace::Session> m_window_trace;
     const bool m_debugger_enabled{};
     const bool m_check_memory_access{};
     static constexpr u64 MinimumRunCycles = 10000U;

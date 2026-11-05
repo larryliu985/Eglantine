@@ -31,6 +31,7 @@ enum class StreamType {
     Render,
     Out,
     In,
+    Sysmix,
 };
 
 struct SinkBuffer {
@@ -78,6 +79,16 @@ public:
      * Stop the sink stream.
      */
     virtual void Stop() {}
+
+    virtual bool IsReady() const {
+        return false;
+    }
+
+    void MarkFaulted() {
+        failed = true;
+    }
+
+    virtual bool TryAppendOutputBlock(SinkBuffer& buffer, std::span<s16> samples);
 
     /**
      * Check if the stream is paused.
@@ -233,6 +244,7 @@ protected:
     u32 device_channels{2};
     /// Is this stream currently paused?
     std::atomic<bool> paused{true};
+    std::atomic<bool> failed{};
     /// Name of this stream
     std::string name{};
 

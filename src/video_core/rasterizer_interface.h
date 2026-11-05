@@ -103,9 +103,13 @@ public:
         Unknown, ///< Neither: the caller drains, flushes the page and notes it synced
         Copied,  ///< `out` (within one 4 KiB page) is filled from the copy made after its writer
         Synced,  ///< Guest memory holds the page: no GPU work wrote it since it was flushed
+        /// Draws write the page: ask again with `past_sync` once the split's back ran the work
+        /// before the last host-level wait (GpuSplit::WaitForSync)
+        NeedsSync,
     };
     virtual GpuWrittenList ReadGpuWrittenCommandList([[maybe_unused]] DAddr addr,
-                                                     [[maybe_unused]] std::span<u8> out) {
+                                                     [[maybe_unused]] std::span<u8> out,
+                                                     [[maybe_unused]] bool past_sync) {
         return GpuWrittenList::Unknown;
     }
 
@@ -121,6 +125,10 @@ public:
     /// Notify rasterizer that any caches of the specified region should be invalidated
     virtual void InvalidateRegion(DAddr addr, u64 size,
                                   VideoCommon::CacheType which = VideoCommon::CacheType::All) = 0;
+
+    /// Called before guest memory in the region is overwritten, ahead of InvalidateRegion
+    virtual void PrepareRegionWrite([[maybe_unused]] DAddr addr, [[maybe_unused]] u64 size,
+                                    [[maybe_unused]] VideoCommon::CacheType which) {}
 
     virtual void InnerInvalidation(std::span<const std::pair<DAddr, std::size_t>> sequences) {
         if (!Settings::values.skip_cpu_inner_invalidation.GetValue()) {
@@ -183,13 +191,13 @@ public:
 
     /// Stand-in for a DLSS evaluation: temporal upscale of src into dst along motion_vectors
     /// (jitter in src pixels; motion_scale turns a motion vector into a UV offset to the previous
-    /// frame), with the frame's depth when known. False when unsupported; the caller then falls
-    /// back to AccelerateSurfaceCopy.
+    /// frame), with depth for NVIDIA DLSS or FSR 3.1. With use_history=false, only de-jitter src.
+    /// False when unsupported; the caller retains its native dispatch.
     [[nodiscard]] virtual bool AccelerateTemporalUpscale(
         const Tegra::Engines::Fermi2D::Surface& src, const Tegra::Engines::Fermi2D::Surface& dst,
         const Tegra::Engines::Fermi2D::Surface& motion_vectors,
         const Tegra::Texture::TICEntry* depth, std::array<f32, 2> jitter,
-        std::array<f32, 2> motion_scale) {
+        std::array<f32, 2> motion_scale, bool use_history = true) {
         return false;
     }
 

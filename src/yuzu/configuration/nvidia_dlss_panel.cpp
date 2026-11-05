@@ -440,8 +440,13 @@ void NvidiaDlssPanel::Download() {
         for (const auto& [title, entry_name] : texts) {
             const ZipEntry* const entry = zip.Find(entry_name);
             const std::optional<std::string> text = entry ? zip.Read(*entry) : std::nullopt;
+            if (!text || text->empty()) {
+                busy.close();
+                fail("could not retrieve NVIDIA's licence text");
+                return;
+            }
             licences += fmt::format("==== {} ====\n\n{}\n\n", title.toStdString(),
-                                    text ? *text : std::string{"(see the release on GitHub)"});
+                                    *text);
         }
     }
 
@@ -454,7 +459,7 @@ void NvidiaDlssPanel::Download() {
     dialog.setWindowTitle(Tr("Download NVIDIA DLSS"));
     QVBoxLayout* layout = new QVBoxLayout(&dialog);
     QLabel* intro = new QLabel(
-        Tr("Eglantine will download %1 from NVIDIA's Streamline %2 release on GitHub into %3.<br>"
+        Tr("Lichii will download %1 from NVIDIA's Streamline %2 release on GitHub into %3.<br>"
            "These files are NVIDIA's, under NVIDIA's licence terms below.")
             .arg(names.join(QStringLiteral(" and ")), QString::fromLatin1(RELEASE_VERSION),
                  PathText(folder)),

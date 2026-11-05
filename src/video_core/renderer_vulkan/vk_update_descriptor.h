@@ -60,6 +60,10 @@ public:
         return upload_start;
     }
 
+    size_t UpdateCount() const noexcept {
+        return upload_start ? static_cast<size_t>(payload_cursor - upload_start) : 0;
+    }
+
     void AddSampledImage(VkImageView image_view, VkSampler sampler) {
         *(payload_cursor++) = VkDescriptorImageInfo{
             .sampler = sampler,
