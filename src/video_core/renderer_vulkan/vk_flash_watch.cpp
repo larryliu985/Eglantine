@@ -12,6 +12,10 @@
 #include <boost/container/small_vector.hpp>
 #include <fmt/format.h>
 
+// Before any Vulkan header: those pull in Xlib, whose Success and Bad* macros break nvdata.h
+// (reached through gpu.h; vk_dlss_network_probe.cpp does the same).
+#include "core/hle/service/nvdrv/nvdata.h"
+
 #include "common/logging.h"
 #include "common/settings.h"
 #include "video_core/host_shaders/vulkan_flash_watch_comp_spv.h"
