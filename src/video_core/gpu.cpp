@@ -316,6 +316,15 @@ struct GPU::Impl {
         return renderer->ReadRasterizer()->OnCPUWrite(addr, size);
     }
 
+    bool IsRegionGpuModified(DAddr addr, u64 size) {
+        return renderer->ReadRasterizer()->MustFlushRegion(addr, size,
+                                                           VideoCommon::CacheType::BufferCache);
+    }
+
+    void InvalidateRegionQueued(DAddr addr, u64 size) {
+        gpu_thread.InvalidateRegionQueued(addr, size, is_async);
+    }
+
     /// Notify rasterizer that any caches of the specified region should be flushed and invalidated
     void FlushAndInvalidateRegion(DAddr addr, u64 size) {
         gpu_thread.FlushAndInvalidateRegion(addr, size, is_async);
@@ -647,6 +656,14 @@ void GPU::InvalidateRegion(DAddr addr, u64 size, bool preserve_gpu_writes) {
 
 bool GPU::OnCPUWrite(DAddr addr, u64 size) {
     return impl->OnCPUWrite(addr, size);
+}
+
+bool GPU::IsRegionGpuModified(DAddr addr, u64 size) {
+    return impl->IsRegionGpuModified(addr, size);
+}
+
+void GPU::InvalidateRegionQueued(DAddr addr, u64 size) {
+    impl->InvalidateRegionQueued(addr, size);
 }
 
 void GPU::FlushAndInvalidateRegion(DAddr addr, u64 size) {
