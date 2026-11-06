@@ -46,6 +46,41 @@ public:
         }
         owner.store(self, std::memory_order_relaxed);
         depth = 1;
+        if (DiagEnabled()) [[unlikely]] {
+            acquired = std::chrono::steady_clock::now();
+        }
+    }
+
+    static bool DiagEnabled() {
+        static const bool diag = std::getenv("EDEN_DIAG_LOCK_TIMING") != nullptr;
+        return diag;
+    }
+
+    static void DiagHold(std::chrono::steady_clock::duration held) {
+        thread_local std::chrono::steady_clock::duration total{};
+        thread_local std::chrono::steady_clock::duration longest{};
+        thread_local std::uint64_t count{};
+        thread_local auto start = std::chrono::steady_clock::now();
+        total += held;
+        longest = held > longest ? held : longest;
+        ++count;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - start < std::chrono::seconds(10)) {
+            return;
+        }
+        char name[32] = "?";
+#ifdef __linux__
+        pthread_getname_np(pthread_self(), name, sizeof(name));
+#endif
+        const double secs = std::chrono::duration<double>(now - start).count();
+        std::fprintf(stderr, "DIAG lock hold %s: %.1f ms/s over %.0f holds/s, longest %.2f ms\n", name,
+                     std::chrono::duration<double, std::milli>(total).count() / secs,
+                     static_cast<double>(count) / secs,
+                     std::chrono::duration<double, std::milli>(longest).count());
+        total = {};
+        longest = {};
+        count = 0;
+        start = now;
     }
 
     static void DiagNote(std::chrono::steady_clock::duration waited) {
@@ -84,12 +119,18 @@ public:
         }
         owner.store(self, std::memory_order_relaxed);
         depth = 1;
+        if (DiagEnabled()) [[unlikely]] {
+            acquired = std::chrono::steady_clock::now();
+        }
         return true;
     }
 
     void unlock() {
         if (--depth != 0) {
             return;
+        }
+        if (DiagEnabled()) [[unlikely]] {
+            DiagHold(std::chrono::steady_clock::now() - acquired);
         }
         owner.store(std::thread::id{}, std::memory_order_relaxed);
         if (state.exchange(0, std::memory_order_release) == 2) {
@@ -130,6 +171,7 @@ private:
     std::atomic<std::uint32_t> state{0}; ///< 0 free, 1 held, 2 held with sleepers
     std::atomic<std::thread::id> owner{};
     std::uint32_t depth{}; ///< Recursion depth, touched only by the owner
+    std::chrono::steady_clock::time_point acquired{}; ///< DIAGNOSTIC: owner's first lock
 };
 
 } // namespace Common
