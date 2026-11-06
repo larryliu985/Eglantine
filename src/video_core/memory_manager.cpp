@@ -5,6 +5,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <array>
+#include <atomic>
+#include <cstdlib>
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -13,7 +16,9 @@
 #include "core/hle/kernel/k_page_table.h"
 #include "core/hle/kernel/k_process.h"
 #include "memory_manager.h"
+#include "video_core/nx2_perf.h"
 #include "video_core/guest_memory.h"
+#include "video_core/nx2_profile.h"
 #include "video_core/nx2.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/invalidation_accumulator.h"
@@ -155,6 +160,7 @@ GPUVAddr MemoryManager::PageTableOp(GPUVAddr gpu_addr, [[maybe_unused]] DAddr de
         std::unique_lock<std::mutex> lock(guard);
         kind_map.Map(gpu_addr, gpu_addr + size, kind);
     }
+    BumpMapSerial(gpu_addr, size);
     return gpu_addr;
 }
 
@@ -210,11 +216,45 @@ GPUVAddr MemoryManager::BigPageTableOp(GPUVAddr gpu_addr, [[maybe_unused]] DAddr
         std::unique_lock<std::mutex> lock(guard);
         kind_map.Map(gpu_addr, gpu_addr + size, kind);
     }
+    BumpMapSerial(gpu_addr, size);
     return gpu_addr;
 }
 
 void MemoryManager::BindRasterizer(VideoCore::RasterizerInterface* rasterizer_) {
     rasterizer = rasterizer_;
+}
+
+void MemoryManager::BumpMapSerial(GPUVAddr begin, size_t size) {
+    const u64 next = map_serial.load(std::memory_order_relaxed) + 1;
+    MapChange& change = map_changes[next % MapChangeCount];
+    change.serial.store(0, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release);
+    change.begin.store(begin, std::memory_order_relaxed);
+    change.end.store(begin + size, std::memory_order_relaxed);
+    change.serial.store(next, std::memory_order_release);
+    map_serial.store(next, std::memory_order_release);
+}
+
+bool MemoryManager::UnchangedSince(u64 since, u64 now, GPUVAddr begin, GPUVAddr end) const {
+    if (now < since || now - since > MapChangeCount / 2) {
+        return false;
+    }
+    for (u64 serial = since + 1; serial <= now; ++serial) {
+        const MapChange& change = map_changes[serial % MapChangeCount];
+        if (change.serial.load(std::memory_order_acquire) != serial) {
+            return false;
+        }
+        const GPUVAddr change_begin = change.begin.load(std::memory_order_relaxed);
+        const GPUVAddr change_end = change.end.load(std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (change.serial.load(std::memory_order_relaxed) != serial) {
+            return false;
+        }
+        if (change_begin < end && begin < change_end) {
+            return false;
+        }
+    }
+    return true;
 }
 
 GPUVAddr MemoryManager::Map(GPUVAddr gpu_addr, DAddr dev_addr, std::size_t size, PTEKind kind, bool is_big_pages) {
@@ -605,6 +645,113 @@ bool MemoryManager::IsMemoryDirty(GPUVAddr gpu_addr, size_t size,
 }
 
 size_t MemoryManager::MaxContinuousRange(GPUVAddr gpu_addr, size_t size) const {
+    // Native storage buffers ask this for up to 8 MiB on each bind: ~90,000 times a second in
+    // Ocarina's Kokiri village, at as many addresses as there are objects, so answers kept per
+    // address missed and walking the pages took ~11% of the GPU back thread. The answer for any
+    // address follows from where the contiguous run through its 4 KiB page ends: keep that per
+    // page and thread until the page table changes.
+    // EXPERIMENT (not for nx2): EDEN_NX2_RUN_CACHE=1 uses the page runs (default: the per-address
+    // cache), =2 the page runs with every answer checked against a walk (differences logged).
+    static const int mode = [] {
+        const char* value = std::getenv("EDEN_NX2_RUN_CACHE");
+        return value == nullptr ? 0 : value[0] - '0';
+    }();
+    const u64 serial = map_serial.load(std::memory_order_acquire);
+    if (mode == 0) {
+        struct Entry {
+            size_t owner;
+            GPUVAddr gpu_addr;
+            size_t size;
+            u64 serial;
+            size_t result;
+        };
+        thread_local std::array<Entry, 64> cache{};
+        Entry& entry = cache[((gpu_addr ^ size) * 0x9E3779B97F4A7C15ULL) >> 58];
+        if (entry.owner == unique_identifier + 1 && entry.gpu_addr == gpu_addr &&
+            entry.size == size && entry.serial == serial) {
+            return entry.result;
+        }
+        const size_t result = MaxContinuousRangeUncached(gpu_addr, size);
+        entry = {unique_identifier + 1, gpu_addr, size, serial, result};
+        return result;
+    }
+    // The run from the page start is walked only as far as asked so far: a miss costs about what
+    // a walk from the address does.
+    struct Run {
+        size_t owner;
+        GPUVAddr page;
+        u64 serial;
+        GPUVAddr end;
+        bool broken; ///< The run ends at end; otherwise it was only walked that far
+    };
+    struct Stats {
+        u64 hits, misses, extends, fallbacks, last_report_ns, last_serial;
+    };
+    thread_local std::array<Run, 4096> runs{};
+    thread_local Stats stats{};
+    // Small pages: Ocarina maps separate allocations into one 64 KiB page, so a run from the big
+    // page's start often ends before the address.
+    const GPUVAddr page = gpu_addr & ~page_mask;
+    const GPUVAddr limit = gpu_addr + size;
+    Run& run = runs[(page >> page_bits) % runs.size()];
+    const auto walk = [&] {
+        const size_t length = MaxContinuousRangeUncached(page, limit - page);
+        run = {unique_identifier + 1, page, serial, page + length, page + length < limit};
+    };
+    if (run.owner == unique_identifier + 1 && run.page == page && run.serial != serial &&
+        VideoCommon::Nx2Perf::Enabled() &&
+        UnchangedSince(run.serial, serial, page,
+                       (std::max)(run.end, limit) + (GPUVAddr{1} << big_page_bits))) {
+        run.serial = serial;
+    }
+    if (run.owner != unique_identifier + 1 || run.page != page || run.serial != serial) {
+        ++stats.misses;
+        walk();
+    } else if (!run.broken && run.end < limit) {
+        ++stats.extends;
+        walk();
+    } else {
+        ++stats.hits;
+    }
+    size_t result;
+    if (run.end > gpu_addr) {
+        // The run from the page start passes gpu_addr, so the run from gpu_addr ends there too.
+        result = (std::min<size_t>)(size, run.end - gpu_addr);
+    } else {
+        ++stats.fallbacks;
+        result = MaxContinuousRangeUncached(gpu_addr, size);
+    }
+    if (VideoCommon::Nx2Profile::Enabled()) [[unlikely]] {
+        const u64 now = VideoCommon::Nx2Profile::Now();
+        if (stats.last_report_ns == 0) {
+            stats.last_report_ns = now;
+            stats.last_serial = serial;
+        } else if (now - stats.last_report_ns >= 10'000'000'000ULL) {
+            const double seconds = static_cast<double>(now - stats.last_report_ns) / 1e9;
+            LOG_INFO(HW_GPU,
+                     "MaxContinuousRange per second: hits {:.0f}, misses {:.0f}, extends {:.0f}, "
+                     "fallbacks {:.0f}, page table changes {:.0f}",
+                     static_cast<double>(stats.hits) / seconds,
+                     static_cast<double>(stats.misses) / seconds,
+                     static_cast<double>(stats.extends) / seconds,
+                     static_cast<double>(stats.fallbacks) / seconds,
+                     static_cast<double>(serial - stats.last_serial) / seconds);
+            stats = {0, 0, 0, 0, now, serial};
+        }
+    }
+    if (mode == 2) [[unlikely]] {
+        const size_t expected = MaxContinuousRangeUncached(gpu_addr, size);
+        static std::atomic<u32> logged{};
+        if (expected != result && logged.fetch_add(1, std::memory_order_relaxed) < 64) {
+            LOG_ERROR(HW_GPU, "MaxContinuousRange({:#x}, {:#x}): run cache {:#x}, walk {:#x}",
+                      gpu_addr, size, result, expected);
+        }
+        return expected;
+    }
+    return result;
+}
+
+size_t MemoryManager::MaxContinuousRangeUncached(GPUVAddr gpu_addr, size_t size) const {
     std::optional<DAddr> old_page_addr{};
     size_t range_so_far = 0;
     bool result{false};

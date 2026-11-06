@@ -442,7 +442,7 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
                              Shader::NumDescriptors(info.image_buffer_descriptors);
         for (size_t index = first; index < first + Shader::NumDescriptors(info.texture_descriptors);
              ++index) {
-            sampled_images.push_back({views[index].index, views[index].id});
+            sampled_images.push_back({views[index].index, views[index].id, samplers[index - first]});
         }
     }
 

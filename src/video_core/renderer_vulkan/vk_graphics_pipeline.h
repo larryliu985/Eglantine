@@ -97,6 +97,7 @@ public:
         u32 stage;
         u32 tic;
         VideoCommon::ImageViewId id;
+        VideoCommon::SamplerId sampler;
     };
 
     /// The sampled textures of the last configured draw, kept while a sampled frame dump runs.
