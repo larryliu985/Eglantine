@@ -18,6 +18,7 @@
 #include <span>
 #include <unordered_map>
 #include <unordered_set>
+#include <tuple>
 #include <vector>
 
 #include "common/container/unordered_map.h"
@@ -332,6 +333,16 @@ public:
     /// Pop asynchronous downloads
     void PopAsyncFlushes();
     void PopAsyncBuffers();
+
+    /// DIAGNOSTIC (EDEN_DIAG_POP_UNLOCKED, unsafe): a fence's downloads written to guest memory
+    /// outside the cache's lock. Prepare and Finish under the lock, Write without it.
+    struct UnlockedPop {
+        std::optional<Async_Buffer> buffer;
+        std::vector<std::tuple<DAddr, const u8*, size_t>> writes;
+    };
+    void PrepareUnlockedPop(UnlockedPop& pop);
+    void WriteUnlockedPop(const UnlockedPop& pop);
+    void FinishUnlockedPop(UnlockedPop& pop);
 
     bool DMACopy(GPUVAddr src_address, GPUVAddr dest_address, u64 amount);
 

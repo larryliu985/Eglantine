@@ -991,6 +991,49 @@ void BufferCache<P>::PopAsyncBuffers() {
 }
 
 template <class P>
+void BufferCache<P>::PrepareUnlockedPop(UnlockedPop& pop) {
+    if (async_buffers.empty()) {
+        return;
+    }
+    if (!async_buffers.front().has_value()) {
+        async_buffers.pop_front();
+        return;
+    }
+    auto& downloads = pending_downloads.front();
+    auto& ranges = pending_download_ranges.front();
+    auto& async_buffer = async_buffers.front();
+    const u8* base = async_buffer->mapped_span.data();
+    const size_t base_offset = async_buffer->offset;
+    for (const auto& copy : downloads) {
+        const DAddr device_addr = static_cast<DAddr>(copy.src_offset);
+        const u8* read_mapped_memory = base + (copy.dst_offset - base_offset);
+        ranges.ForEachInRange(device_addr, copy.size, [&](DAddr start, DAddr end) {
+            pop.writes.emplace_back(start, &read_mapped_memory[start - device_addr], end - start);
+            gpu_modified_ranges.Subtract(start, end - start);
+        });
+    }
+    pop.buffer = std::move(async_buffer);
+    async_buffers.pop_front();
+    pending_downloads.pop_front();
+    pending_download_ranges.pop_front();
+}
+
+template <class P>
+void BufferCache<P>::WriteUnlockedPop(const UnlockedPop& pop) {
+    for (const auto& [start, data, size] : pop.writes) {
+        device_memory.WriteBlockUnsafe(start, data, size);
+    }
+}
+
+template <class P>
+void BufferCache<P>::FinishUnlockedPop(UnlockedPop& pop) {
+    if (pop.buffer) {
+        async_buffers_death_ring.emplace_back(std::move(*pop.buffer));
+        pop.buffer.reset();
+    }
+}
+
+template <class P>
 bool BufferCache<P>::IsRegionGpuModified(DAddr addr, size_t size) {
     // One lookup instead of visiting every range inside (~4% of the GPU thread for title 1's
     // inline uploads once GPU-written ranges are no longer cleared by downloads).

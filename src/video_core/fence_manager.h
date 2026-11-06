@@ -298,7 +298,24 @@ private:
             }
             const auto t_buf0 = DiagClock::now();
             auto t_buf1 = t_buf0;
-            if (buffer_pops != 0) {
+            static const bool pop_unlocked = std::getenv("EDEN_DIAG_POP_UNLOCKED") != nullptr;
+            if (buffer_pops != 0 && pop_unlocked) {
+                std::vector<typename TBufferCache::UnlockedPop> pops(buffer_pops);
+                {
+                    std::scoped_lock lock{buffer_cache.mutex};
+                    t_buf1 = DiagClock::now();
+                    for (auto& pop : pops) {
+                        buffer_cache.PrepareUnlockedPop(pop);
+                    }
+                }
+                for (const auto& pop : pops) {
+                    buffer_cache.WriteUnlockedPop(pop);
+                }
+                std::scoped_lock lock{buffer_cache.mutex};
+                for (auto& pop : pops) {
+                    buffer_cache.FinishUnlockedPop(pop);
+                }
+            } else if (buffer_pops != 0) {
                 std::scoped_lock lock{buffer_cache.mutex};
                 t_buf1 = DiagClock::now();
                 for (size_t i = 0; i < buffer_pops; ++i) {
