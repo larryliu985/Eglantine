@@ -277,6 +277,9 @@ public:
     /// Whether the buffer cache holds GPU-written data in the range, not yet downloaded.
     [[nodiscard]] bool IsRegionGpuModified(DAddr addr, u64 size);
 
+    /// An NCE read trap on the range was consumed (RasterizerInterface::ForgetReadTrap).
+    void ForgetReadTrap(DAddr addr, u64 size);
+
     /// The CPU wrote these bytes: the GPU thread takes them, after the work queued before, and
     /// keeps the GPU-written data around them. Doesn't wait.
     void InvalidateRegionQueued(DAddr addr, u64 size);
