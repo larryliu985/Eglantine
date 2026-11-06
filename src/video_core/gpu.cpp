@@ -306,6 +306,16 @@ struct GPU::Impl {
         gpu_thread.FlushRegion(addr, size, is_async);
     }
 
+    /// OnCPURead without its Preflushable shortcut: the guest CPU reads this range now.
+    void ForceCPURead(DAddr addr, u64 size) {
+        const u64 fence = RequestSyncOperation([this, addr, size]() {
+            InvalidateGPUCache();
+            renderer->ReadRasterizer()->FlushRegion(addr, size);
+        });
+        gpu_thread.TickGPU(is_async);
+        WaitForSyncOperation(fence);
+    }
+
     VideoCore::RasterizerDownloadArea OnCPURead(DAddr addr, u64 size) {
         auto raster_area = renderer->ReadRasterizer()->GetFlushArea(addr, size);
         if (raster_area.preemtive) {
@@ -734,6 +744,10 @@ bool GPU::OnCPUWrite(DAddr addr, u64 size) {
 
 bool GPU::IsRegionGpuModified(DAddr addr, u64 size) {
     return impl->IsRegionGpuModified(addr, size);
+}
+
+void GPU::ForceCPURead(DAddr addr, u64 size) {
+    impl->ForceCPURead(addr, size);
 }
 
 void GPU::ForgetReadTrap(DAddr addr, u64 size) {
