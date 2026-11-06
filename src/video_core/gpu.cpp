@@ -662,6 +662,10 @@ bool GPU::IsRegionGpuModified(DAddr addr, u64 size) {
     return impl->IsRegionGpuModified(addr, size);
 }
 
+void GPU::ForgetReadTrap(DAddr addr, u64 size) {
+    impl->renderer->ReadRasterizer()->ForgetReadTrap(addr, size);
+}
+
 void GPU::InvalidateRegionQueued(DAddr addr, u64 size) {
     impl->InvalidateRegionQueued(addr, size);
 }

@@ -856,6 +856,25 @@ private:
 
     /// GPU writes that are not downloaded at fences: trap the guest CPU's next read of their
     /// pages, which flushes them on demand (or marks them Preflushable with preflushing enabled).
+public:
+    /// The core lifted a trap of this range without a flush through GetFlushArea.
+    void ForgetReadTrap(DAddr device_addr, u64 size) {
+        const DAddr begin = Common::AlignDown(device_addr, Core::DEVICE_PAGESIZE);
+        const DAddr end = Common::AlignUp(device_addr + size, Core::DEVICE_PAGESIZE);
+        read_trapped_ranges.Subtract(begin, end - begin);
+    }
+
+    /// EDEN_NX2_NCE_SAFE_PREFLUSH=1: Preflushable ranges are downloaded at fences and still
+    /// trapped, so an NCE read waits until the download has landed instead of reading over it.
+    static bool NceSafePreflush() {
+        static const bool on = [] {
+            const char* value = std::getenv("EDEN_NX2_NCE_SAFE_PREFLUSH");
+            return value != nullptr && value[0] == '1';
+        }();
+        return on;
+    }
+
+private:
     void ArmReadTraps(DAddr device_addr, u64 size) {
         const DAddr begin = Common::AlignDown(device_addr, Core::DEVICE_PAGESIZE);
         const DAddr end = Common::AlignUp(device_addr + size, Core::DEVICE_PAGESIZE);
