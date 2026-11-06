@@ -17,6 +17,7 @@
 #include <span>
 #include <string_view>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 #include <bit>
 #include <cstring>
@@ -1150,12 +1151,18 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     // This fork's files: its records carry task/mesh state other builds of the same cache version
     // cannot read, and their loader deletes a file it fails to read. The shared files of earlier
     // builds are copied once.
+    // "-frizti2": also holds pipelines with trap-guarded programs (zortos293/Lichii#192), which
+    // builds that read "-frizti" files do not expect. Seeded once from those, else the shared files.
     pipeline_cache_filename =
-        VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan-frizti", CACHE_VERSION);
+        VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan-frizti2", CACHE_VERSION);
     used_pipelines_filename =
-        VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_used-frizti", CACHE_VERSION);
+        VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_used-frizti2", CACHE_VERSION);
     for (const auto& [shared, own] :
-         {std::pair{VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan", CACHE_VERSION),
+         {std::pair{VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan-frizti", CACHE_VERSION),
+                    pipeline_cache_filename},
+          std::pair{VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_used-frizti", CACHE_VERSION),
+                    used_pipelines_filename},
+          std::pair{VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan", CACHE_VERSION),
                     pipeline_cache_filename},
           std::pair{VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_used", CACHE_VERSION),
                     used_pipelines_filename}}) {
@@ -1172,6 +1179,13 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     size_t skipped_pipelines = 0;
     size_t queued_graphics = 0;
     std::vector<std::pair<GraphicsPipelineCacheKey, std::vector<FileEnvironment>>> deferred_graphics;
+    // EDEN_NX2_UNIT_COVER=1 (zortos293/Lichii#335): at least one pipeline per unique shader stage
+    // is built at boot, so the driver has each stage compiled when new combinations show up.
+    static const bool unit_cover = [] {
+        const char* value = std::getenv("EDEN_NX2_UNIT_COVER");
+        return value != nullptr && value[0] == '1';
+    }();
+    std::unordered_set<u64> covered_shader_units;
 
     if (use_vulkan_pipeline_cache) {
         vulkan_pipeline_cache_filename =
@@ -1253,7 +1267,15 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
 
         const u64 hash = key.Hash();
         disk_pipelines.insert(hash);
-        if (!PreloadAllPipelines() &&
+        bool unit_cover_needed = false;
+        if (unit_cover) {
+            for (const u64 stage_hash : key.unique_hashes) {
+                if (stage_hash != 0 && covered_shader_units.insert(stage_hash).second) {
+                    unit_cover_needed = true;
+                }
+            }
+        }
+        if (!PreloadAllPipelines() && !unit_cover_needed &&
             (used_pipelines.empty() ? queued_graphics >= MaxPipelinesWithoutUsedList
                                     : !used_pipelines.contains(hash))) {
             ++skipped_pipelines;
