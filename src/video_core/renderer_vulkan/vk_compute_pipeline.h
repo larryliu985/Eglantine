@@ -74,6 +74,7 @@ public:
     struct SampledImage {
         u32 tic;
         VideoCommon::ImageViewId id;
+        VideoCommon::SamplerId sampler;
     };
 
     /// The textures sampled by the last configured dispatch, kept while a sampled frame dump runs.

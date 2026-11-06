@@ -23,6 +23,7 @@
 #include "common/thread.h"
 #include "video_core/delayed_destruction_ring.h"
 #include "video_core/gpu.h"
+#include "video_core/gpu_wait_site.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/syncpoint_manager.h"
 #include "video_core/nx2_profile.h"
@@ -81,7 +82,10 @@ public:
 
     void SignalFence(std::function<void()>&& func) {
         Nx2Profile::Scope profile_scope{Nx2Profile::Zone::Fence};
-        const bool delay_fence = Settings::IsGPUFenceBehaviorDefault() ? Settings::IsGPULevelHigh() : Settings::IsGPUFenceBehaviorBalanced() || Settings::IsGPUFenceBehaviorAccurate();
+        // The accuracy can change while the game runs (settings dialog, Settings::UpdateGPUAccuracy
+        // at each command list end): read once, every decision of this fence uses one value.
+        const bool level_high = Settings::IsGPULevelHigh();
+        const bool delay_fence = Settings::IsGPUFenceBehaviorDefault() ? level_high : Settings::IsGPUFenceBehaviorBalanced() || Settings::IsGPUFenceBehaviorAccurate();
         if constexpr (!can_async_check) {
             TryReleasePendingFences<false>();
         }
@@ -120,6 +124,13 @@ public:
             guard.unlock();
             cv.notify_all();
         }
+        if (delay_fence) {
+            // Its callback runs on the fencing thread once the fence's work is done, and the
+            // guest or WaitPendingFences may block on that callback: a submission left for
+            // later (Scheduler::DeferFlush) would wait for the back to go idle, which it then
+            // never does (GPU accuracy switched to High while the game ran, 24 s and more).
+            SubmitDeferredWork();
+        }
         rasterizer.InvalidateGPUCache();
     }
 
@@ -152,6 +163,11 @@ public:
                 wait_cv.notify_all();
             });
             SignalFence(std::move(func));
+            // The fence's commands can be held back by a deferred flush that only this thread
+            // submits. The fencing thread waits for that submission before releasing the fence,
+            // so waiting here without submitting deadlocks (Ocarina of Time entering gameplay).
+            SubmitDeferredWork();
+            BackWaitScope wait_scope{"FenceManager::WaitPendingFences (fencing thread callback)"};
             std::unique_lock lk(wait_mutex);
             wait_cv.wait(
                 lk, [&wait_finished] { return wait_finished.load(std::memory_order_relaxed); });
@@ -187,6 +203,8 @@ protected:
     virtual bool IsFenceSignaled(TFence& fence) const = 0;
     /// Waits until a fence has been signalled by the host GPU.
     virtual void WaitFence(TFence& fence) = 0;
+    /// Submits work whose submission the backend deferred (called before blocking on a fence).
+    virtual void SubmitDeferredWork() {}
 
     VideoCore::RasterizerInterface& rasterizer;
     Tegra::GPU& gpu;

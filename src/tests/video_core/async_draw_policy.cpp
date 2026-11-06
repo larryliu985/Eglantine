@@ -24,3 +24,35 @@ TEST_CASE("Legacy pending draws retain the async heuristic", "[video_core][async
     REQUIRE_FALSE(Vulkan::CanDiscardPendingDraw(false, false, 100, 6));
     REQUIRE_FALSE(Vulkan::CanDiscardPendingDraw(false, false, 0, 0));
 }
+
+TEST_CASE("Deferred shader emission never makes a pending draw discardable",
+          "[video_core][async_draw]") {
+    constexpr std::array<u32, 6> counts{0, 1, 6, 7, 4096, std::numeric_limits<u32>::max()};
+    for (const bool native : {false, true}) {
+        REQUIRE_FALSE(Vulkan::DefersShaderEmission(false, native, 0, 1));
+        if (!Vulkan::DefersShaderEmission(true, native, 0, 1)) {
+            continue;
+        }
+        for (const bool depth : {false, true}) {
+            for (const u32 indices : counts) {
+                for (const u32 vertices : counts) {
+                    REQUIRE_FALSE(Vulkan::CanDiscardPendingDraw(native, depth, indices, vertices));
+                }
+            }
+        }
+    }
+    REQUIRE(Vulkan::DefersShaderEmission(true, true, 0, 1));
+    REQUIRE_FALSE(Vulkan::DefersShaderEmission(true, false, 0, 1));
+}
+
+TEST_CASE("Deferred emission falls back when its worker budget is full",
+          "[video_core][async_draw]") {
+    for (const size_t capacity : {1U, 2U, 23U}) {
+        for (size_t pending = 0; pending < capacity; ++pending) {
+            REQUIRE(Vulkan::DefersShaderEmission(true, true, pending, capacity));
+        }
+        REQUIRE_FALSE(Vulkan::DefersShaderEmission(true, true, capacity, capacity));
+        REQUIRE_FALSE(Vulkan::DefersShaderEmission(true, true, capacity + 1, capacity));
+    }
+    REQUIRE_FALSE(Vulkan::DefersShaderEmission(true, true, 0, 0));
+}

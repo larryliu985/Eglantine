@@ -11,6 +11,7 @@
 #include <deque>
 #include <mutex>
 #include <regex>
+#include <string_view>
 #include <thread>
 
 #if defined(__ANDROID__)
@@ -32,6 +33,7 @@
 #include "common/fs/path_util.h"
 #include "common/literals.h"
 #include "common/polyfill_thread.h"
+#include "common/scm_rev.h"
 #include "common/thread.h"
 
 #include "common/logging.h"
@@ -272,8 +274,18 @@ struct FileBackend final : public Backend {
                         return std::string{s};
                 return std::string{};
             }();
-            if (!username.empty())
+            if (!username.empty()) {
+                // The build version can contain the username ("Frizti v2" for user "Frizt").
+                const std::string_view version{Common::g_build_version};
+                const bool keep_version =
+                    !version.empty() && version.find(username) != std::string_view::npos &&
+                    message.find(version) != std::string::npos;
+                if (keep_version)
+                    boost::replace_all(message, version, "\x01");
                 boost::replace_all(message, username, "user");
+                if (keep_version)
+                    boost::replace_all(message, "\x01", version);
+            }
         }
 #endif
         bytes_written += file->WriteSpan(std::span<const char>{message.begin(), message.end()});

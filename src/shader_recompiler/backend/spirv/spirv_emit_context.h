@@ -311,6 +311,9 @@ public:
     Id render_area_push_constant{};
     u32 render_are_member_index{};
 
+    Id mesh_draw_base_push_constant{};
+    u32 mesh_draw_base_member_index{};
+
     Id local_memory{};
 
     bool uses_explicit_workgroup_layout{};
@@ -385,6 +388,7 @@ public:
     Id mesh_primitive_count{};
     Id mesh_shared_u32{};   ///< pointer type to one workgroup word
     Id mesh_primitive_indices{};
+    Id mesh_point_size{}; ///< PointSize output array of a mesh program, if any
     MeshInfo mesh_info{};
     u32 mesh_threads{};
     u32 mesh_attribute_words{};
@@ -431,6 +435,9 @@ private:
     void DefineRescalingInputPushConstant();
     void DefineRescalingInputUniformConstant();
     void DefineRenderArea(const Info& info);
+    void DefineMeshDrawBase();
+    [[nodiscard]] bool UsesMeshDrawBase() const;
+    [[nodiscard]] u32 MeshDrawBaseOffset() const;
 
     void DefineInputs(const IR::Program& program);
     void DefineOutputs(const IR::Program& program);

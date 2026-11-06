@@ -12,6 +12,7 @@
 #include "audio_core/audio_core.h"
 #include "common/fs/fs.h"
 #include "common/logging.h"
+#include "common/nx2_sampler.h"
 #include "common/adpf.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
@@ -490,6 +491,7 @@ struct System::Impl {
             room_member->SendGameInfo(game_info);
         }
         debug_service = Nx2Debug::MaybeStartService(system, name, params.program_id);
+        Nx2Sampler::StartFromEnvironment();
         return SystemResultStatus::Success;
     }
 

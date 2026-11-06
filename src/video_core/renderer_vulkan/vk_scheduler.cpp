@@ -25,6 +25,7 @@
 #include "common/dkb_cpu_trace.h"
 #include "common/thread.h"
 #include "video_core/gpu_logging/gpu_logging.h"
+#include "video_core/nx2_perf.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/renderer_vulkan/vk_command_pool.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
@@ -187,7 +188,10 @@ bool Scheduler::DeferFlush() {
     // for about 5%.
     static const s64 interval_us = [] {
         const char* value = std::getenv("EDEN_NX2_FENCE_FLUSH_US");
-        return value == nullptr ? s64{500} : static_cast<s64>(std::atoll(value));
+        if (value != nullptr) {
+            return static_cast<s64>(std::atoll(value));
+        }
+        return VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::FenceFlush) ? s64{5000} : s64{500};
     }();
     if (interval_us <= 0 || !VideoCommon::GpuSplit::OnBackThread() ||
         std::chrono::steady_clock::now() - last_flush >= std::chrono::microseconds{interval_us}) {
@@ -219,9 +223,17 @@ bool Scheduler::WaitSubmitted(u64 tick) {
         }
         if (const auto now = std::chrono::steady_clock::now(); now >= next_log) {
             next_log = now + std::chrono::seconds{2};
-            LOG_WARNING(Render_Vulkan, "Waited {} s for the GPU thread to submit tick {}",
+            // The back serves the request between entries: one that never does is blocked in
+            // an entry. Name the wait when it is a tracked one (BackWaitScope).
+            const char* const back_site = VideoCommon::back_wait_site.load(std::memory_order_relaxed);
+            LOG_WARNING(Render_Vulkan,
+                        "Waited {} s for the GPU thread to submit tick {} (submitted up to {}); "
+                        "GPU back thread blocked in: {}",
                         std::chrono::duration_cast<std::chrono::seconds>(now - start).count(),
-                        tick);
+                        tick, master_semaphore->CurrentTick() - 1,
+                        back_site != nullptr ? back_site
+                                             : "no tracked wait (an untracked lock or wait, or "
+                                               "a long entry)");
             split.RequestIdleHook();
         }
         if (spins < 64) {
@@ -838,6 +850,7 @@ void Scheduler::AllocateNewContext() {
 }
 
 void Scheduler::InvalidateState() {
+    ++recording_epoch;
     state.graphics_pipeline = nullptr;
     state.rescaling_defined = false;
     state.descriptor_buffer_bound = false;
@@ -857,7 +870,8 @@ void Scheduler::EndRenderPass()
         if (!state.renderpass) {
             return;
         }
-        fragment_barrier_pending = false;
+        ++recording_epoch;
+        fragment_barrier.Reset();
         render_pass_has_stores = false;
 
         query_cache->CounterClose(VideoCommon::QueryType::StreamingByteCount);

@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <span>
 #include <array>
 #include <cstddef>
 #include <cstring>
@@ -45,27 +46,68 @@ constexpr std::array<const char*, 14> EXEFS_FILE_NAMES{
     "subsdk3", "subsdk4",   "subsdk5", "subsdk6", "subsdk7", "subsdk8", "subsdk9",
 };
 
+/// Bytes a built-in patch writes at an offset into the module's code (after the NSO header; an
+/// exefs IPS patch's offset is 0x100 more). With `checked`, the module must hold `original` there.
+struct BuiltinPatchRecord {
+    size_t module_offset;
+    std::span<const u8> bytes;
+    bool checked;
+    u32 original;
+};
+
 struct BuiltinPatch {
     std::string_view name;
     u64 title_id;
     std::string_view module;
     std::string_view build_id;
-    size_t module_offset;
-    u32 original;
-    u32 replacement;
+    std::span<const BuiltinPatchRecord> records;
+};
+
+// Ocarina of Time takes its "dynamic resolution disabled" path, so the 3D renders at full scale
+// instead of following the GPU-time controller down to its 480p floor.
+constexpr std::array<u8, 4> MAX_RESOLUTION_BRANCH{0x0F, 0x02, 0x00, 0x14}; // b 0x80640c
+constexpr std::array MAX_RESOLUTION_RECORDS{
+    BuiltinPatchRecord{.module_offset = 0x805BD0,
+                       .bytes = MAX_RESOLUTION_BRANCH,
+                       .checked = true,
+                       .original = 0x360041E8}, // tbz w8, #0, 0x80640c
+};
+
+// Dynamic FPS by Dark (Eglantine Dev), bundled with his permission: the game's frame step follows
+// the time measured with the system counter instead of assuming 30 fps, so it runs at full speed
+// at any frame rate. A call (bl 0x3c46200) to a routine in unused space after the code.
+constexpr std::array<u8, 4> DYNAMIC_FPS_CALL{0x4F, 0x7D, 0xD5, 0x94};
+constexpr std::array<u8, 120> DYNAMIC_FPS_ROUTINE{
+    0x28, 0x18, 0x20, 0x1E, 0xCA, 0x92, 0x00, 0xB0, 0x4A, 0x01, 0x38, 0x91,
+    0x2B, 0xE0, 0x3B, 0xD5, 0x4C, 0x01, 0x40, 0xF9, 0x4B, 0x01, 0x00, 0xF9,
+    0xCC, 0x02, 0x00, 0xB4, 0x6B, 0x01, 0x0C, 0xCB, 0x0D, 0xE0, 0x3B, 0xD5,
+    0x8E, 0x02, 0x80, 0xD2, 0xAE, 0x09, 0xCE, 0x9A, 0x7F, 0x01, 0x0E, 0xEB,
+    0xCB, 0x81, 0x8B, 0x9A, 0x4C, 0x05, 0x40, 0xF9, 0x4C, 0x00, 0x00, 0xB5,
+    0xEC, 0x03, 0x0B, 0xAA, 0x6E, 0x01, 0x0C, 0xCB, 0x8C, 0x0D, 0x8E, 0x8B,
+    0x4C, 0x05, 0x00, 0xF9, 0x82, 0x01, 0x23, 0x9E, 0xA3, 0x01, 0x23, 0x9E,
+    0x42, 0x18, 0x23, 0x1E, 0x42, 0x08, 0x21, 0x1E, 0xC3, 0x00, 0x00, 0x1C,
+    0x03, 0x09, 0x23, 0x1E, 0x40, 0x20, 0x23, 0x1E, 0x4D, 0x00, 0x00, 0x54,
+    0x48, 0x40, 0x20, 0x1E, 0xC0, 0x03, 0x5F, 0xD6, 0x0A, 0xD7, 0x83, 0x3F,
+};
+constexpr std::array DYNAMIC_FPS_RECORDS{
+    BuiltinPatchRecord{.module_offset = 0x6E6CC4, .bytes = DYNAMIC_FPS_CALL},
+    BuiltinPatchRecord{.module_offset = 0x3C46200, .bytes = DYNAMIC_FPS_ROUTINE},
 };
 
 constexpr std::array BUILTIN_PATCHES{
-    // Ocarina of Time takes its "dynamic resolution disabled" path, so the 3D renders at full scale
-    // instead of following the GPU-time controller down to its 480p floor.
     BuiltinPatch{
         .name = "Max Resolution (built-in)",
         .title_id = 0x0400486024DEC000,
         .module = "main",
         .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
-        .module_offset = 0x805BD0,
-        .original = 0x360041E8,    // tbz w8, #0, 0x80640c
-        .replacement = 0x1400020F, // b 0x80640c
+        .records = MAX_RESOLUTION_RECORDS,
+    },
+    BuiltinPatch{
+        .name = "Dynamic FPS by Dark (built-in)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = DYNAMIC_FPS_RECORDS,
     },
 };
 
@@ -498,32 +540,49 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
                      patch.build_id);
             continue;
         }
-        const size_t offset = sizeof(Loader::NSOHeader) + patch.module_offset;
-        const auto word_at = [offset](const std::vector<u8>& data) -> std::optional<u32> {
-            if (data.size() < offset + sizeof(u32)) {
-                return std::nullopt;
+        // Every record must fit and hold its original bytes, and none may have been patched by a
+        // user mod already (the mod's patch is used then, for all records).
+        bool apply = true;
+        for (const BuiltinPatchRecord& record : patch.records) {
+            const size_t offset = sizeof(Loader::NSOHeader) + record.module_offset;
+            if (nso.size() < offset + record.bytes.size() ||
+                out.size() < offset + record.bytes.size()) {
+                LOG_WARNING(Loader, "    - Skipping \"{}\": {}+{:#x} is past the module's end",
+                            patch.name, name, record.module_offset);
+                apply = false;
+                break;
             }
-            u32 word;
-            std::memcpy(&word, data.data() + offset, sizeof(word));
-            return word;
-        };
-        const auto original = word_at(nso);
-        if (original != patch.original) {
-            LOG_WARNING(Loader, "    - Skipping \"{}\": {}+{:#x} holds {:#010x}, expected {:#010x}",
-                        patch.name, name, patch.module_offset, original.value_or(0),
-                        patch.original);
+            if (record.checked) {
+                u32 original;
+                std::memcpy(&original, nso.data() + offset, sizeof(original));
+                if (original != record.original) {
+                    LOG_WARNING(Loader,
+                                "    - Skipping \"{}\": {}+{:#x} holds {:#010x}, expected {:#010x}",
+                                patch.name, name, record.module_offset, original, record.original);
+                    apply = false;
+                    break;
+                }
+            }
+            if (!std::equal(record.bytes.begin(), record.bytes.end(), nso.begin() + offset) &&
+                !std::equal(nso.begin() + offset, nso.begin() + offset + record.bytes.size(),
+                            out.begin() + offset)) {
+                LOG_INFO(Loader,
+                         "    - Skipping \"{}\": a user mod already patched {}+{:#x}, the mod's "
+                         "patch is used",
+                         patch.name, name, record.module_offset);
+                apply = false;
+                break;
+            }
+        }
+        if (!apply) {
             continue;
         }
-        if (const auto modded = word_at(out); modded != patch.original) {
-            LOG_INFO(Loader,
-                     "    - Skipping \"{}\": a user mod already patched {}+{:#x} to {:#010x}, "
-                     "the mod's patch is used",
-                     patch.name, name, patch.module_offset, modded.value_or(0));
-            continue;
+        for (const BuiltinPatchRecord& record : patch.records) {
+            std::memcpy(out.data() + sizeof(Loader::NSOHeader) + record.module_offset,
+                        record.bytes.data(), record.bytes.size());
         }
-        std::memcpy(out.data() + offset, &patch.replacement, sizeof(patch.replacement));
-        LOG_INFO(Loader, "    - Applying built-in patch \"{}\" at {}+{:#x}", patch.name, name,
-                 patch.module_offset);
+        LOG_INFO(Loader, "    - Applying built-in patch \"{}\" ({} records) to {}", patch.name,
+                 patch.records.size(), name);
     }
 
     if (out.size() < sizeof(Loader::NSOHeader)) {

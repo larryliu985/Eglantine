@@ -5,8 +5,8 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 add_executable(tests
+    video_core/unswizzle_workers.cpp
     video_core/aftermath_dump.cpp
-    video_core/frame_dump_schedule.cpp
     video_core/gpu_timestamp.cpp
     core/nx2_streamplay.cpp
     core/nx2_video_ready.cpp
@@ -37,8 +37,10 @@ add_executable(tests
     video_core/storage_buffer_control_flow.cpp
     core/nup_validation.cpp
     input_common/calibration_lifetime.cpp
+    input_common/tas_input.cpp
     video_core/ampere_logged_numeric.cpp
     video_core/ampere_logged_textures.cpp
+    video_core/oot_visual_workaround.cpp
     video_core/native_texture_header_index.cpp
     video_core/texture_handles.cpp
     video_core/ampere_selevet_modes.cpp
@@ -54,10 +56,14 @@ add_executable(tests
     video_core/ampere_async_copy.cpp
     video_core/ampere_trap_guards.cpp
     video_core/async_draw_policy.cpp
+    video_core/async_shader_emission.cpp
+    video_core/pipeline_build.cpp
     video_core/multi_range_refresh.cpp
     video_core/command_fetch_order.cpp
     video_core/command_snapshot_suspensions.cpp
     video_core/pending_maps.cpp
+    video_core/maxwell_fast_method.cpp
+    video_core/split_write_tracker.cpp
     hid_core/sensor_info.cpp
     common/paged_scalar.cpp
     common/queue_lifetime.cpp
@@ -110,6 +116,9 @@ add_executable(tests
     core/priority_queue.cpp
     core/internal_network/network.cpp
     video_core/memory_tracker.cpp
+    video_core/memory_manager_runs.cpp
+    video_core/nx2_perf_draw_binds.cpp
+    video_core/nx2_perf_texture_writes.cpp
     video_core/h264_packet.cpp
     video_core/nx2_gpu_mapping.cpp
     video_core/vertex_repack.cpp
@@ -123,6 +132,7 @@ add_executable(tests
     video_core/ampere_bindless_surfaces.cpp
     video_core/native_macro_fifo.cpp
     video_core/uniform_stream_reuse.cpp
+    video_core/usage_tracker.cpp
     video_core/shader_invalidation.cpp
     video_core/descriptor_table.cpp
     video_core/global_address_tracking.cpp

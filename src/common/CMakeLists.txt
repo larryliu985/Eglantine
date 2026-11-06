@@ -45,6 +45,8 @@ add_library(
     div_ceil.h
     dkb_cpu_trace.cpp
     dkb_cpu_trace.h
+    nx2_sampler.cpp
+    nx2_sampler.h
     dynamic_library.cpp
     dynamic_library.h
     elf.h
@@ -124,6 +126,8 @@ add_library(
     swap.h
     thread.cpp
     thread.h
+    nx2_sample_profile.cpp
+    nx2_sample_profile.h
     thread_cpu_clock.cpp
     thread_cpu_clock.h
     adpf.cpp
