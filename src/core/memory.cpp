@@ -1130,8 +1130,23 @@ struct Memory::Impl {
                 }
             });
             auto& gpu = system.GPU();
+            static const bool safe_preflush = [] {
+                const char* value = std::getenv("EDEN_NX2_NCE_SAFE_PREFLUSH");
+                return value != nullptr && value[0] == '1';
+            }();
             for (size_t i = 0; i < count; ++i) {
+                if (safe_preflush) {
+                    // Before the flush: a GPU write registered after this arms the page again
+                    // (its generation changes and the trap stays below); one registered before
+                    // it is ordered before the flush.
+                    gpu.ForgetReadTrap(addresses[i], YUZU_PAGESIZE);
+                }
                 (void)gpu.OnCPURead(addresses[i], YUZU_PAGESIZE);
+                // A Preflushable page returns without flushing: its fence download may not have
+                // landed yet. Flush what is still GPU-written.
+                if (safe_preflush && gpu.IsRegionGpuModified(addresses[i], YUZU_PAGESIZE)) {
+                    gpu.WaitForSyncOperation(gpu.RequestFlush(addresses[i], YUZU_PAGESIZE));
+                }
             }
         }
         // Lifted by the last flush of the page, and only if no GPU write armed it again meanwhile
