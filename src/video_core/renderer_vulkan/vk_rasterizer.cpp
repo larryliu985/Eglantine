@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <map>
 #include <array>
 #include <chrono>
 #include <memory>
@@ -1548,6 +1549,32 @@ void RasterizerVulkan::DispatchCompute() {
     };
     scheduler.Record([](vk::CommandBuffer cmdbuf) { cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                0, READ_BARRIER); });
+    // DIAGNOSTIC: EDEN_DIAG_DISPATCH_HASHES=<hash>,...: dispatch sizes of those shaders.
+    if (static const std::string diag_hashes = [] {
+            const char* text = std::getenv("EDEN_DIAG_DISPATCH_HASHES");
+            return text ? "," + std::string{text} + "," : std::string{};
+        }();
+        !diag_hashes.empty() &&
+        diag_hashes.find(fmt::format(",{:016x},", pipeline->ShaderHash())) != std::string::npos) {
+        static std::mutex diag_mutex;
+        static std::map<u64, u64> diag_counts;
+        static const auto diag_start = std::chrono::steady_clock::now();
+        std::scoped_lock lk{diag_mutex};
+        const u64 n = ++diag_counts[pipeline->ShaderHash()];
+        const u64 groups = u64{dim[0]} * dim[1] * dim[2];
+        if (n <= 8 || (n & (n - 1)) == 0 || groups > 4096) {
+            if (std::FILE* out = std::fopen("/tmp/dispatchdiag.log", "a")) {
+                const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                                               diag_start).count();
+                std::fprintf(out, "%.3f %016llx n=%llu grid=%ux%ux%u block=%ux%ux%u\n", t,
+                             static_cast<unsigned long long>(pipeline->ShaderHash()),
+                             static_cast<unsigned long long>(n), dim[0], dim[1], dim[2],
+                             static_cast<u32>(qmd.block_dim_x), static_cast<u32>(qmd.block_dim_y),
+                             static_cast<u32>(qmd.block_dim_z));
+                std::fclose(out);
+            }
+        }
+    }
     scheduler.TraceComputePipeline(pipeline->ShaderHash());
     scheduler.Record([this, pipeline, dim, byte_addressed_shadow](vk::CommandBuffer cmdbuf) {
         if (!pipeline->IsBound()) {
