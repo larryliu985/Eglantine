@@ -3978,6 +3978,12 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
     u32 high_uniforms = 0;
     for (;;) {
         LoweredProgram lowered = LowerToMaxwellWith(code, high_uniforms, options);
+        // Shadowing borrows aligned quartets below the mirrors: their base must be 4-aligned.
+        if (!lowered && lowered.error == "native program uses lowering scratch registers" &&
+            (high_uniforms & 3) != 0) {
+            high_uniforms = (high_uniforms + 3) & ~3U;
+            continue;
+        }
         if (lowered || lowered.high_uniform_registers <= high_uniforms) return lowered;
         high_uniforms = lowered.high_uniform_registers;
     }
