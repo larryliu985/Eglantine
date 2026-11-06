@@ -129,6 +129,10 @@ public:
     /// Notify rasterizer that any caches of the specified region should be invalidated
     void InvalidateRegion(DAddr addr, u64 size);
 
+    /// Invalidates the region on the GPU thread, after the commands queued before it, without
+    /// waiting for it.
+    void InvalidateRegionQueued(DAddr addr, u64 size, bool is_async);
+
     /// Notify rasterizer that any caches of the specified region should be flushed and invalidated
     void FlushAndInvalidateRegion(DAddr addr, u64 size, bool is_async);
 
