@@ -1454,6 +1454,10 @@ void Device::RemoveUnsuitableExtensions() {
 
     // VK_EXT_descriptor_buffer
     extensions.descriptor_buffer = features.descriptor_buffer.descriptorBuffer;
+    // DIAGNOSTIC: EDEN_DIAG_NO_DESCRIPTOR_BUFFER=1 uses descriptor sets instead.
+    if (std::getenv("EDEN_DIAG_NO_DESCRIPTOR_BUFFER") != nullptr) {
+        extensions.descriptor_buffer = false;
+    }
     RemoveExtensionFeatureIfUnsuitable(extensions.descriptor_buffer, features.descriptor_buffer,
                                        VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME);
 
