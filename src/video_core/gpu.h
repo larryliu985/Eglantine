@@ -283,6 +283,9 @@ public:
     /// An NCE read trap on the range was consumed (RasterizerInterface::ForgetReadTrap).
     void ForgetReadTrap(DAddr addr, u64 size);
 
+    /// Flushes the range for a guest CPU read now, Preflushable or not, and waits for it.
+    void ForceCPURead(DAddr addr, u64 size);
+
     /// The CPU wrote these bytes: the GPU thread takes them, after the work queued before, and
     /// keeps the GPU-written data around them. Doesn't wait.
     void InvalidateRegionQueued(DAddr addr, u64 size);
