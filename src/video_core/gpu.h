@@ -277,6 +277,13 @@ public:
     /// sensible, false otherwise, addr and size must be a valid combination
     bool OnCPUWrite(DAddr addr, u64 size);
 
+    /// Whether the buffer cache holds GPU-written data in the range, not yet downloaded.
+    [[nodiscard]] bool IsRegionGpuModified(DAddr addr, u64 size);
+
+    /// The CPU wrote these bytes: the GPU thread takes them, after the work queued before, and
+    /// keeps the GPU-written data around them. Doesn't wait.
+    void InvalidateRegionQueued(DAddr addr, u64 size);
+
     /// Notify rasterizer that any caches of the specified region should be flushed and invalidated
     void FlushAndInvalidateRegion(DAddr addr, u64 size);
 
