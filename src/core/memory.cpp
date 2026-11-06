@@ -18,6 +18,7 @@
 #include <span>
 #include <thread>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -685,6 +686,11 @@ struct Memory::Impl {
         for (u64 page = vaddr >> YUZU_PAGEBITS; page != page_end; ++page) {
             const bool cached = std::as_const(current_page_table->entries)[page].Type() ==
                                 Common::PageType::RasterizerCachedMemory;
+            if (cached) {
+                // A new GPU write: an NCE read of the page that is flushing older data must not
+                // lift this trap (HandleNCEReadTrap compares the generation).
+                ++nce_trap_generation[page];
+            }
             armed_read_trap_count.fetch_add(1, std::memory_order_relaxed);
             if (!cached || !armed_read_traps.insert(page).second) {
                 armed_read_trap_count.fetch_sub(1, std::memory_order_relaxed);
@@ -1073,29 +1079,54 @@ struct Memory::Impl {
     /// (HandleRasterizerDownload). The page is readable again afterwards; a write faults once
     /// more, as a write.
     bool HandleNCEReadTrap(u64 vaddr) {
-        if (!ReadTrapArmed(vaddr, YUZU_PAGESIZE)) {
+        const u64 page = vaddr >> YUZU_PAGEBITS;
+        if (armed_read_trap_count.load(std::memory_order_relaxed) == 0) {
             return false;
         }
+        u64 generation = 0;
+        {
+            std::scoped_lock lk{read_trap_mutex};
+            if (!armed_read_traps.contains(page)) {
+                return false;
+            }
+            generation = nce_trap_generation[page];
+            ++nce_trap_flushing[page];
+        }
+        // The page stays without access while it flushes: other cores' accesses fault here too.
         bool rasterizer = false;
         const u8* const p = GetPointerImpl(vaddr, [] {}, [&] { rasterizer = true; });
-        if (!rasterizer || p == nullptr) {
-            DisarmReadTraps(vaddr, YUZU_PAGESIZE);
-            return true;
-        }
         if (!gpu_device_memory) [[unlikely]] {
             gpu_device_memory = &system.Host1x().MemoryManager();
         }
-        if (!gpu_device_memory->IsPhysicalPointer(p)) [[unlikely]] {
-            DisarmReadTraps(vaddr, YUZU_PAGESIZE);
+        if (rasterizer && p != nullptr && gpu_device_memory->IsPhysicalPointer(p)) {
+            // Device addresses first, then wait for the GPU without sys_core_guard held.
+            std::array<DAddr, 8> addresses{};
+            size_t count = 0;
+            ApplyOnDeviceAddresses(p, [&](DAddr address) {
+                if (count < addresses.size()) {
+                    addresses[count++] = address;
+                }
+            });
+            auto& gpu = system.GPU();
+            for (size_t i = 0; i < count; ++i) {
+                (void)gpu.OnCPURead(addresses[i], YUZU_PAGESIZE);
+            }
+        }
+        // Lifted by the last flush of the page, and only if no GPU write armed it again meanwhile
+        // (its data is not in guest memory yet: the next access flushes again).
+        std::scoped_lock lk{read_trap_mutex};
+        const auto flushing = nce_trap_flushing.find(page);
+        if (--flushing->second != 0) {
             return true;
         }
-        // Flush first, then lift the trap: while the page has no access another core's read of
-        // it faults here too instead of reading the guest copy before the GPU data lands.
-        auto& gpu = system.GPU();
-        ApplyOnDeviceAddresses(p, [&](DAddr address) {
-            (void)gpu.OnCPURead(address, YUZU_PAGESIZE);
-        });
-        DisarmReadTraps(vaddr, YUZU_PAGESIZE);
+        nce_trap_flushing.erase(flushing);
+        if (nce_trap_generation[page] != generation || !armed_read_traps.contains(page)) {
+            return true;
+        }
+        host_buffer->Protect(page << YUZU_PAGEBITS, YUZU_PAGESIZE, Common::MemoryPermission::Read);
+        armed_read_traps.erase(page);
+        armed_read_trap_count.fetch_sub(1, std::memory_order_relaxed);
+        nce_trap_generation.erase(page);
         return true;
     }
 
@@ -1165,6 +1196,9 @@ struct Memory::Impl {
     std::array<u64, Core::Hardware::NUM_CPU_CORES> read_area_generations{};
     std::atomic<u64> read_trap_generation{};
     std::set<u64> armed_read_traps;
+    /// NCE read traps (read_trap_mutex): arm requests per page, and NCE reads flushing it.
+    std::unordered_map<u64, u64> nce_trap_generation;
+    std::unordered_map<u64, u32> nce_trap_flushing;
     std::atomic<size_t> armed_read_trap_count{};
     std::mutex read_trap_mutex;
     std::array<GPUDirtyState, Core::Hardware::NUM_CPU_CORES> rasterizer_write_areas{};
