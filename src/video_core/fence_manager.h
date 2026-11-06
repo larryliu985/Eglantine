@@ -6,6 +6,9 @@
 
 #pragma once
 
+#include <chrono>
+#include <cstdlib>
+
 #include <algorithm>
 #include <condition_variable>
 #include <cstdlib>
@@ -259,9 +262,20 @@ private:
                 }
                 take_front();
             }
+            // DIAGNOSTIC (EDEN_DIAG_FENCE_TIMING): where the fence thread's time goes.
+            static const bool diag = std::getenv("EDEN_DIAG_FENCE_TIMING") != nullptr;
+            using DiagClock = std::chrono::steady_clock;
+            const auto diag_ns = [](DiagClock::time_point a, DiagClock::time_point b) {
+                return static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count());
+            };
+            static u64 d_wait{}, d_buf_lock{}, d_buf_pop{}, d_tex{}, d_ops{}, d_batches{}, d_fences{},
+                d_buf_pops{};
+            static auto d_start = DiagClock::now();
+            const auto t_wait0 = DiagClock::now();
             if (!batch.front().fence->IsStubbed()) {
                 WaitFence(batch.front().fence);
             }
+            const auto t_wait1 = DiagClock::now();
             {
                 std::unique_lock lock(guard);
                 while (batch.size() < MaxBatch && !fences.empty() &&
@@ -275,23 +289,51 @@ private:
                 texture_pops += (released.flushes & TextureFlushes) != 0 ? 1 : 0;
                 buffer_pops += (released.flushes & BufferFlushes) != 0 ? 1 : 0;
             }
+            const auto t_tex0 = DiagClock::now();
             if (texture_pops != 0) {
                 std::scoped_lock lock{texture_cache.mutex};
                 for (size_t i = 0; i < texture_pops; ++i) {
                     texture_cache.PopAsyncFlushes();
                 }
             }
+            const auto t_buf0 = DiagClock::now();
+            auto t_buf1 = t_buf0;
             if (buffer_pops != 0) {
                 std::scoped_lock lock{buffer_cache.mutex};
+                t_buf1 = DiagClock::now();
                 for (size_t i = 0; i < buffer_pops; ++i) {
                     buffer_cache.PopAsyncFlushes();
                 }
             }
+            const auto t_ops0 = DiagClock::now();
             // Queries and operations keep their per-fence order.
             for (Released& released : batch) {
                 query_cache.PopAsyncFlushes();
                 for (auto& operation : released.operations) {
                     operation();
+                }
+            }
+            if (diag) {
+                const auto t_ops1 = DiagClock::now();
+                d_wait += diag_ns(t_wait0, t_wait1);
+                d_tex += diag_ns(t_tex0, t_buf0);
+                d_buf_lock += diag_ns(t_buf0, t_buf1);
+                d_buf_pop += diag_ns(t_buf1, t_ops0);
+                d_ops += diag_ns(t_ops0, t_ops1);
+                d_buf_pops += buffer_pops;
+                d_fences += batch.size();
+                ++d_batches;
+                if (t_ops1 - d_start > std::chrono::seconds(10)) {
+                    const double secs = std::chrono::duration<double>(t_ops1 - d_start).count();
+                    LOG_INFO(HW_GPU,
+                             "DIAG fence thread per second: gpu wait {:.1f} ms, texture pops {:.1f} ms, "
+                             "buffer lock {:.1f} ms, buffer pops {:.1f} ms ({:.0f}/s), operations {:.1f} ms, "
+                             "batches {:.0f}/s, fences {:.0f}/s",
+                             d_wait / 1e6 / secs, d_tex / 1e6 / secs, d_buf_lock / 1e6 / secs,
+                             d_buf_pop / 1e6 / secs, d_buf_pops / secs, d_ops / 1e6 / secs,
+                             d_batches / secs, d_fences / secs);
+                    d_wait = d_buf_lock = d_buf_pop = d_tex = d_ops = d_batches = d_fences = d_buf_pops = 0;
+                    d_start = t_ops1;
                 }
             }
             {

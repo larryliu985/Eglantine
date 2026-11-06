@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: 2022 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <chrono>
 #include <atomic>
 #include <cstdlib>
 
@@ -68,9 +69,45 @@ void DrainBack() {
 // The fence manager records into the scheduler and downloads the CPU's writes over GPU data:
 // the back's state, which a drained back still uses from its idle hook (it submits).
 void ReleaseFences(DmaPusher& dma_pusher) {
+    // DIAGNOSTIC (EDEN_DIAG_FENCE_TIMING): the front's wait split into the back reaching the
+    // release (queue), the release itself (exec: waits for the host GPU and the fence thread)
+    // and handing back (tail).
+    static const bool diag = std::getenv("EDEN_DIAG_FENCE_TIMING") != nullptr;
+    if (!diag) {
+        VideoCommon::GpuSplit::Get().Run(
+            [rasterizer = dma_pusher.rasterizer] { rasterizer->ReleaseFences(); },
+            VideoCommon::DrainSite::FenceRelease);
+        return;
+    }
+    using Clock = std::chrono::steady_clock;
+    const auto t0 = Clock::now();
+    Clock::time_point t1{}, t2{};
     VideoCommon::GpuSplit::Get().Run(
-        [rasterizer = dma_pusher.rasterizer] { rasterizer->ReleaseFences(); },
+        [rasterizer = dma_pusher.rasterizer, &t1, &t2] {
+            t1 = Clock::now();
+            rasterizer->ReleaseFences();
+            t2 = Clock::now();
+        },
         VideoCommon::DrainSite::FenceRelease);
+    const auto t3 = Clock::now();
+    static u64 queue{}, exec{}, tail{}, count{};
+    static auto start = t0;
+    const auto ns = [](Clock::time_point a, Clock::time_point b) {
+        return static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count());
+    };
+    queue += ns(t0, t1);
+    exec += ns(t1, t2);
+    tail += ns(t2, t3);
+    ++count;
+    if (t3 - start > std::chrono::seconds(10)) {
+        const double secs = std::chrono::duration<double>(t3 - start).count();
+        LOG_INFO(HW_GPU,
+                 "DIAG front fence release per second: {:.0f} releases, queue {:.1f} ms, "
+                 "exec {:.1f} ms, tail {:.1f} ms",
+                 count / secs, queue / 1e6 / secs, exec / 1e6 / secs, tail / 1e6 / secs);
+        queue = exec = tail = count = 0;
+        start = t3;
+    }
 }
 
 } // Anonymous namespace
