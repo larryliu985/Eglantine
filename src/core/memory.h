@@ -506,6 +506,21 @@ public:
 
     bool InvalidateNCE(Common::ProcessAddress vaddr, size_t size);
 
+    /// Whether a native-code write fault on this page would have to wait for the host GPU: the
+    /// page is write-protected (not read-trapped) for the rasterizer and the buffer cache holds
+    /// GPU-written data on it, which handing the whole page to the CPU downloads first.
+    bool IsNCEWriteToGpuWrittenPage(Common::ProcessAddress vaddr);
+
+    /// A native-code access fault on a read-trapped page: flushes the page as a read through the
+    /// rasterizer does and disarms the trap. False if the page holds no trap.
+    bool HandleNCEReadTrap(Common::ProcessAddress vaddr);
+
+    /// Between these, this thread's writes to rasterizer-cached memory are recorded with their
+    /// exact ranges instead of collected for the GPU. The end hands each range to the GPU thread,
+    /// so the bytes are in memory before the GPU reads them.
+    void BeginNCEWriteCapture();
+    void EndNCEWriteCapture();
+
     bool InvalidateSeparateHeap(void* fault_address);
 
 private:

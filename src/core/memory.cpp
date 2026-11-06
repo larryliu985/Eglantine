@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
@@ -40,6 +41,17 @@
 #include "video_core/rasterizer_download_area.h"
 
 namespace Core::Memory {
+
+namespace {
+// Writes a native-code fault handler performs through Memory, between Begin/EndNCEWriteCapture.
+// One instruction writes at most two ranges (a store across a page boundary).
+struct NCEWriteCapture {
+    bool active = false;
+    std::size_t count = 0;
+    std::array<std::pair<u64, std::size_t>, 8> writes{};
+};
+thread_local NCEWriteCapture nce_write_capture;
+} // Anonymous namespace
 
 u32& UnmappedReadFlag() {
     thread_local u32 flag{};
@@ -589,9 +601,15 @@ struct Memory::Impl {
             const char* value = std::getenv("EDEN_NX2_READ_TRAPS");
             return value != nullptr && value[0] == '0';
         }();
+        // Native code execution takes read traps with EDEN_NX2_NCE_READ_TRAPS=1: its fault
+        // handler runs a trapped page's read through the rasterizer (HandleNCEReadTrap).
+        static const bool nce_traps = [] {
+            const char* value = std::getenv("EDEN_NX2_NCE_READ_TRAPS");
+            return value != nullptr && value[0] == '1';
+        }();
         return !disabled && current_page_table->fastmem_arena &&
                !Settings::values.use_reactive_flushing.GetValue() &&
-               Settings::values.cpu_backend.GetValue() != Settings::CpuBackend::Nce;
+               (nce_traps || Settings::values.cpu_backend.GetValue() != Settings::CpuBackend::Nce);
     }
 
     void RasterizerArmReadTraps(u64 vaddr, u64 size) {
@@ -922,6 +940,15 @@ struct Memory::Impl {
     }
 
     void HandleRasterizerWrite(VAddr v_address, size_t size) {
+        if (nce_write_capture.active) [[unlikely]] {
+            auto& capture = nce_write_capture;
+            if (capture.count < capture.writes.size()) {
+                capture.writes[capture.count++] = {v_address, size};
+                return;
+            }
+            LOG_ERROR(HW_Memory, "NCE write capture full, write @ {:#x}+{:#x} collected", v_address,
+                      size);
+        }
         const auto* p = GetPointerImpl(
             v_address, []() {}, []() {});
         constexpr size_t sys_core = Core::Hardware::NUM_CPU_CORES - 1;
@@ -987,6 +1014,94 @@ struct Memory::Impl {
         auto& gpu = system.GPU();
         gpu_device_memory->ApplyOpOnPointer(
             p, scratch_buffers[core], [&](DAddr address) { gpu.InvalidateRegion(address, size, true); });
+    }
+
+    /// A native-code access to a read-trapped page: what a slow-path read of it does
+    /// (HandleRasterizerDownload). The page is readable again afterwards; a write faults once
+    /// more, as a write.
+    bool HandleNCEReadTrap(u64 vaddr) {
+        if (!ReadTrapArmed(vaddr, YUZU_PAGESIZE)) {
+            return false;
+        }
+        bool rasterizer = false;
+        const u8* const p = GetPointerImpl(vaddr, [] {}, [&] { rasterizer = true; });
+        if (!rasterizer || p == nullptr) {
+            DisarmReadTraps(vaddr, YUZU_PAGESIZE);
+            return true;
+        }
+        if (!gpu_device_memory) [[unlikely]] {
+            gpu_device_memory = &system.Host1x().MemoryManager();
+        }
+        if (!gpu_device_memory->IsPhysicalPointer(p)) [[unlikely]] {
+            DisarmReadTraps(vaddr, YUZU_PAGESIZE);
+            return true;
+        }
+        // Flush first, then lift the trap: while the page has no access another core's read of
+        // it faults here too instead of reading the guest copy before the GPU data lands.
+        auto& gpu = system.GPU();
+        ApplyOnDeviceAddresses(p, [&](DAddr address) {
+            (void)gpu.OnCPURead(address, YUZU_PAGESIZE);
+        });
+        DisarmReadTraps(vaddr, YUZU_PAGESIZE);
+        return true;
+    }
+
+    bool IsNCEWriteToGpuWrittenPage(u64 vaddr) {
+        // A read-trapped page faults on reads as well: those keep the page invalidation.
+        if (ReadTrapArmed(vaddr, YUZU_PAGESIZE)) {
+            return false;
+        }
+        bool rasterizer = false;
+        u8* const p = GetPointerImpl(vaddr, [] {}, [&] { rasterizer = true; });
+        if (!rasterizer || p == nullptr) {
+            return false;
+        }
+        bool gpu_written = false;
+        auto& gpu = system.GPU();
+        ApplyOnDeviceAddresses(p, [&](DAddr address) {
+            gpu_written = gpu_written || gpu.IsRegionGpuModified(address, YUZU_PAGESIZE);
+        });
+        return gpu_written;
+    }
+
+    void EndNCEWriteCapture() {
+        auto& capture = nce_write_capture;
+        capture.active = false;
+        if (!gpu_device_memory) [[unlikely]] {
+            gpu_device_memory = &system.Host1x().MemoryManager();
+        }
+        auto& gpu = system.GPU();
+        for (std::size_t i = 0; i < capture.count; ++i) {
+            const auto [v_address, size] = capture.writes[i];
+            const u8* const p = GetPointerImpl(v_address, [] {}, [] {});
+            if (p == nullptr || !gpu_device_memory->IsPhysicalPointer(p)) {
+                continue;
+            }
+            ApplyOnDeviceAddresses(p, [&](DAddr address) {
+                if (address != 0 && size != 0) {
+                    gpu.InvalidateRegionQueued(address, size);
+                }
+            });
+        }
+        capture.count = 0;
+    }
+
+    template <typename Func>
+    void ApplyOnDeviceAddresses(const u8* p, Func&& func) {
+        constexpr size_t sys_core = Core::Hardware::NUM_CPU_CORES - 1;
+        const size_t core = (std::min)(system.GetCurrentHostThreadID(), sys_core);
+        if (!gpu_device_memory) [[unlikely]] {
+            gpu_device_memory = &system.Host1x().MemoryManager();
+        }
+        if (core == sys_core) [[unlikely]] {
+            sys_core_guard.lock();
+        }
+        SCOPE_EXIT {
+            if (core == sys_core) [[unlikely]] {
+                sys_core_guard.unlock();
+            }
+        };
+        gpu_device_memory->ApplyOpOnPointer(p, scratch_buffers[core], func);
     }
 
     Core::System& system;
@@ -1226,6 +1341,23 @@ bool Memory::InvalidateNCE(Common::ProcessAddress vaddr, size_t size) {
 #endif
 
     return mapped && ptr != nullptr;
+}
+
+bool Memory::HandleNCEReadTrap(Common::ProcessAddress vaddr) {
+    return impl->HandleNCEReadTrap(GetInteger(vaddr) & ~YUZU_PAGEMASK);
+}
+
+bool Memory::IsNCEWriteToGpuWrittenPage(Common::ProcessAddress vaddr) {
+    return impl->IsNCEWriteToGpuWrittenPage(GetInteger(vaddr) & ~YUZU_PAGEMASK);
+}
+
+void Memory::BeginNCEWriteCapture() {
+    nce_write_capture.count = 0;
+    nce_write_capture.active = true;
+}
+
+void Memory::EndNCEWriteCapture() {
+    impl->EndNCEWriteCapture();
 }
 
 bool Memory::InvalidateSeparateHeap(void* fault_address) {
