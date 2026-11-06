@@ -2434,6 +2434,11 @@ void RasterizerVulkan::FinishRead(DAddr addr, u64 size) {
     buffer_cache.FinishReadDownloads(addr, size);
 }
 
+void RasterizerVulkan::ForgetReadTrap(DAddr addr, u64 size) {
+    std::scoped_lock lock{buffer_cache.mutex};
+    buffer_cache.ForgetReadTrap(addr, size);
+}
+
 bool RasterizerVulkan::MustFlushRegion(DAddr addr, u64 size, VideoCommon::CacheType which) {
     if ((True(which & VideoCommon::CacheType::BufferCache)) && MayBeGpuModified(addr, size)) {
         std::scoped_lock lock{buffer_cache.mutex};
