@@ -695,6 +695,22 @@ void TraceWindowTarget(const Tegra::Engines::Maxwell3D& maxwell3d, Tegra::Memory
         }
     }
 }
+// DIAGNOSTIC: EDEN_DIAG_SKIP_INDIRECT=draw|dispatch|all skips GPU-sourced indirect work.
+bool DiagSkipIndirect(bool dispatch) {
+    static const int mode = [] {
+        const char* v = std::getenv("EDEN_DIAG_SKIP_INDIRECT");
+        if (v == nullptr) return 0;
+        const std::string_view s{v};
+        return s == "draw" ? 1 : s == "dispatch" ? 2 : s == "all" ? 3 : 0;
+    }();
+    if ((mode & (dispatch ? 2 : 1)) == 0) return false;
+    static std::atomic<u64> n{};
+    const u64 c = n.fetch_add(1, std::memory_order_relaxed) + 1;
+    if ((c & (c - 1)) == 0) {
+        LOG_WARNING(Render_Vulkan, "DIAG skipped indirect {}: {}", dispatch ? "dispatch" : "draw", c);
+    }
+    return true;
+}
 } // Anonymous namespace
 
 void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
@@ -896,6 +912,7 @@ void RasterizerVulkan::DrawIndirect() {
     if (Common::DkbFrameTrace::Enabled()) {
         ++trace_indirect;
     }
+    if (DiagSkipIndirect(false)) return;
     buffer_cache.SetDrawIndirect(&params);
     PrepareDraw(params.is_indexed, [this, &params] {
         if (VideoCommon::RenderTrace::SampleFrame(render_trace_frame) && render_trace_draws <= 2048) {
@@ -1496,6 +1513,7 @@ void RasterizerVulkan::DispatchCompute() {
                               {qmd.block_dim_x, qmd.block_dim_y, qmd.block_dim_z},
                               indirect_address, indirect_grid);
     }
+    if (indirect_address && DiagSkipIndirect(true)) return;
     if (indirect_address) {
         // DispatchIndirect
         static constexpr auto sync_info = VideoCommon::ObtainBufferSynchronize::FullSynchronize;
