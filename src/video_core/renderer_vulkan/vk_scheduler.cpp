@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <memory>
 #include <algorithm>
@@ -192,8 +193,17 @@ void Scheduler::HangWatch(std::stop_token token) {
             continue;
         }
         reported = true;
-        LOG_CRITICAL(Render_Vulkan, "HANG WATCH: GPU tick stuck at {} (submitted up to {}) for 3 s",
-                     known, current - 1);
+        std::FILE* out = std::fopen("/tmp/hangwatch.log", "a");
+        const auto emit = [out](const std::string& line) {
+            LOG_CRITICAL(Render_Vulkan, "{}", line);
+            if (out) {
+                std::fputs(line.c_str(), out);
+                std::fputc(10, out);
+                std::fflush(out);
+            }
+        };
+        emit(fmt::format("HANG WATCH: GPU tick stuck at {} (submitted up to {}) for 3 s", known,
+                         current - 1));
         std::scoped_lock lk{hang_mutex};
         std::vector<const HangWork*> pending;
         for (const auto& work : hang_ring) {
@@ -208,8 +218,11 @@ void Scheduler::HangWatch(std::stop_token token) {
             for (u32 s = 0; s < w.num; ++s) {
                 list += fmt::format(" {:016x}", w.shaders[s]);
             }
-            LOG_CRITICAL(Render_Vulkan, "HANG WATCH: pending tick {} draws={} dispatches={} shaders({}):{}",
-                         w.tick, w.draws, w.dispatches, w.num, list);
+            emit(fmt::format("HANG WATCH: pending tick {} draws={} dispatches={} shaders({}):{}",
+                             w.tick, w.draws, w.dispatches, w.num, list));
+        }
+        if (out) {
+            std::fclose(out);
         }
     }
 }
