@@ -4,6 +4,12 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#ifdef __linux__
+#include <pthread.h>
+#endif
 #include <cstdint>
 #include <thread>
 
@@ -28,10 +34,41 @@ public:
         std::uint32_t expected = 0;
         if (!state.compare_exchange_strong(expected, 1, std::memory_order_acquire,
                                            std::memory_order_relaxed)) {
-            LockContended();
+            // DIAGNOSTIC (EDEN_DIAG_LOCK_TIMING): per-thread time waiting for contended locks.
+            static const bool diag = std::getenv("EDEN_DIAG_LOCK_TIMING") != nullptr;
+            if (diag) [[unlikely]] {
+                const auto t0 = std::chrono::steady_clock::now();
+                LockContended();
+                DiagNote(std::chrono::steady_clock::now() - t0);
+            } else {
+                LockContended();
+            }
         }
         owner.store(self, std::memory_order_relaxed);
         depth = 1;
+    }
+
+    static void DiagNote(std::chrono::steady_clock::duration waited) {
+        thread_local std::chrono::steady_clock::duration total{};
+        thread_local std::uint64_t count{};
+        thread_local auto start = std::chrono::steady_clock::now();
+        total += waited;
+        ++count;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - start < std::chrono::seconds(10)) {
+            return;
+        }
+        char name[32] = "?";
+#ifdef __linux__
+        pthread_getname_np(pthread_self(), name, sizeof(name));
+#endif
+        const double secs = std::chrono::duration<double>(now - start).count();
+        std::fprintf(stderr, "DIAG lock wait %s: %.1f ms/s over %.0f waits/s\n", name,
+                     std::chrono::duration<double, std::milli>(total).count() / secs,
+                     static_cast<double>(count) / secs);
+        total = {};
+        count = 0;
+        start = now;
     }
 
     bool try_lock() {
