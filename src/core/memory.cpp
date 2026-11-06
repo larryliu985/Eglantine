@@ -1070,7 +1070,7 @@ struct Memory::Impl {
                 // A Preflushable page returns without flushing: its fence download may not have
                 // landed yet. Flush what is still GPU-written.
                 if (safe_preflush && gpu.IsRegionGpuModified(addresses[i], YUZU_PAGESIZE)) {
-                    gpu.WaitForSyncOperation(gpu.RequestFlush(addresses[i], YUZU_PAGESIZE));
+                    gpu.ForceCPURead(addresses[i], YUZU_PAGESIZE);
                 }
             }
         }
