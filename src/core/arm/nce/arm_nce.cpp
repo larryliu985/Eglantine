@@ -4,7 +4,9 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
 #include <cinttypes>
+#include <cstdlib>
 #include <memory>
 
 #include "common/signal_chain.h"
@@ -165,6 +167,49 @@ bool ArmNce::HandleGuestAccessFault(GuestContext* guest_ctx, void* raw_info, voi
     const Common::ProcessAddress addr =
         (reinterpret_cast<u64>(info->si_addr) & ~Memory::YUZU_PAGEMASK);
     auto& memory = guest_ctx->parent->m_running_thread->GetOwnerProcess()->GetMemory();
+
+    // Handing a page with GPU-written data to the CPU first downloads that data, and the guest
+    // thread waits for the host GPU to finish its work (Switch 2 titles write next to what their
+    // compute shaders fill in: Zelda: Ocarina of Time spent most of each frame there). Perform the
+    // write through Memory instead and give its exact bytes to the GPU thread, which uploads them
+    // into the buffer around the GPU's data; the page keeps its protection.
+    // A read trap (EDEN_NX2_NCE_READ_TRAPS): GPU-written data the guest is about to read. The
+    // access runs again on the readable page; a write faults again and takes the paths below.
+    if (memory.HandleNCEReadTrap(addr)) {
+        static std::atomic<u64> read_traps{};
+        const u64 count = read_traps.fetch_add(1, std::memory_order_relaxed) + 1;
+        if ((count & (count - 1)) == 0) {
+            LOG_INFO(Core_ARM, "NCE read traps taken: {}", count);
+        }
+        return true;
+    }
+
+    static const bool emulate_gpu_page_writes = [] {
+        const char* value = std::getenv("EDEN_NX2_NCE_EMULATE_WRITES");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (emulate_gpu_page_writes && memory.IsNCEWriteToGpuWrittenPage(addr)) {
+        auto& host_ctx = static_cast<ucontext_t*>(raw_context)->uc_mcontext;
+        auto* fpctx = GetFloatingPointState(host_ctx);
+        static std::atomic<u64> emulated{}, declined{};
+        memory.BeginNCEWriteCapture();
+        const auto next_pc = MatchAndExecuteOneInstruction(memory, &host_ctx, fpctx);
+        memory.EndNCEWriteCapture();
+        if (next_pc) {
+            host_ctx.pc = *next_pc;
+            const u64 count = emulated.fetch_add(1, std::memory_order_relaxed) + 1;
+            if ((count & (count - 1)) == 0) {
+                LOG_INFO(Core_ARM, "NCE writes to GPU-written pages performed in place: {}", count);
+            }
+            return true;
+        }
+        // Not an instruction the interpreter handles (exclusive or atomic): invalidate the page.
+        const u64 count = declined.fetch_add(1, std::memory_order_relaxed) + 1;
+        if ((count & (count - 1)) == 0) {
+            LOG_INFO(Core_ARM, "NCE writes to GPU-written pages left to invalidation: {}", count);
+        }
+    }
+
     if (memory.InvalidateNCE(addr, Memory::YUZU_PAGESIZE)) {
         // We handled the access successfully and are returning to guest code.
         return true;

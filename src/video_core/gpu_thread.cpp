@@ -186,6 +186,10 @@ void ThreadManager::InvalidateRegion(DAddr addr, u64 size) {
     rasterizer->OnCacheInvalidation(addr, size);
 }
 
+void ThreadManager::InvalidateRegionQueued(DAddr addr, u64 size, bool is_async) {
+    PushCommand(InvalidateRegionCommand(addr, size), false, is_async);
+}
+
 void ThreadManager::FlushAndInvalidateRegion(DAddr addr, u64 size, bool is_async) {
     if (Settings::IsGPULevelHigh()) {
         if (!is_async) {
