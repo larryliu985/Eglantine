@@ -17,6 +17,7 @@
 #include <thread>
 #include <utility>
 
+#include <fmt/chrono.h>
 #include <fmt/format.h>
 
 #include "video_core/renderer_vulkan/vk_query_cache.h"
@@ -184,6 +185,14 @@ void Scheduler::HangWatch(std::stop_token token) {
         const u64 current = master_semaphore->CurrentTick();
         const auto now = std::chrono::steady_clock::now();
         if (known != last || known + 1 >= current) {
+            if (reported) {
+                const double stalled = std::chrono::duration<double>(now - since).count();
+                if (std::FILE* out = std::fopen("/tmp/hangwatch.log", "a")) {
+                    std::fprintf(out, "HANG WATCH: resumed after %.1f s (tick %llu)\n", stalled,
+                                 static_cast<unsigned long long>(known));
+                    std::fclose(out);
+                }
+            }
             last = known;
             since = now;
             reported = false;
@@ -202,8 +211,8 @@ void Scheduler::HangWatch(std::stop_token token) {
                 std::fflush(out);
             }
         };
-        emit(fmt::format("HANG WATCH: GPU tick stuck at {} (submitted up to {}) for 3 s", known,
-                         current - 1));
+        emit(fmt::format("HANG WATCH: [{:%T}] GPU tick stuck at {} (submitted up to {}) for 3 s",
+                         std::chrono::system_clock::now(), known, current - 1));
         std::scoped_lock lk{hang_mutex};
         std::vector<const HangWork*> pending;
         for (const auto& work : hang_ring) {
