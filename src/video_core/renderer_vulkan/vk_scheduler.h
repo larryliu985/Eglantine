@@ -513,6 +513,24 @@ private:
     bool worker_waiting{}; ///< The worker is waiting for work (guarded by queue_mutex)
     std::jthread worker_thread;
 
+    // DIAGNOSTIC (EDEN_DIAG_HANG_WATCH): shaders of recent submissions, logged when the GPU
+    // stops advancing.
+    struct HangWork {
+        u64 tick{};
+        u32 num{};
+        u32 draws{};
+        u32 dispatches{};
+        std::array<u64, 128> shaders{};
+    };
+    void HangNote(u64 hash);
+    void HangWatch(std::stop_token token);
+    bool hang_watch{};
+    HangWork hang_work{};
+    std::mutex hang_mutex;
+    std::array<HangWork, 32> hang_ring{};
+    u32 hang_ring_next{};
+    std::jthread hang_thread;
+
     std::chrono::steady_clock::duration frame_interval{};
     std::chrono::steady_clock::time_point start_time{};
     double last_target_fps{};

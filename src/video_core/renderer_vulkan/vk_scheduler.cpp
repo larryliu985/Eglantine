@@ -151,9 +151,74 @@ Scheduler::Scheduler(const Device& device_, StateTracker& state_tracker_)
     AcquireNewChunk();
     AllocateWorkerCommandBuffer();
     worker_thread = std::jthread([this](std::stop_token token) { WorkerThread(token); });
+    hang_watch = std::getenv("EDEN_DIAG_HANG_WATCH") != nullptr;
+    if (hang_watch) {
+        hang_thread = std::jthread([this](std::stop_token token) { HangWatch(token); });
+    }
+}
+
+void Scheduler::HangNote(u64 hash) {
+    if (hash == 0) {
+        return;
+    }
+    for (u32 i = 0; i < hang_work.num; ++i) {
+        if (hang_work.shaders[i] == hash) {
+            return;
+        }
+    }
+    if (hang_work.num < hang_work.shaders.size()) {
+        hang_work.shaders[hang_work.num++] = hash;
+    }
+}
+
+void Scheduler::HangWatch(std::stop_token token) {
+    using namespace std::chrono_literals;
+    u64 last = 0;
+    auto since = std::chrono::steady_clock::now();
+    bool reported = false;
+    while (!token.stop_requested()) {
+        std::this_thread::sleep_for(250ms);
+        master_semaphore->Refresh();
+        const u64 known = master_semaphore->KnownGpuTick();
+        const u64 current = master_semaphore->CurrentTick();
+        const auto now = std::chrono::steady_clock::now();
+        if (known != last || known + 1 >= current) {
+            last = known;
+            since = now;
+            reported = false;
+            continue;
+        }
+        if (reported || now - since < 3s) {
+            continue;
+        }
+        reported = true;
+        LOG_CRITICAL(Render_Vulkan, "HANG WATCH: GPU tick stuck at {} (submitted up to {}) for 3 s",
+                     known, current - 1);
+        std::scoped_lock lk{hang_mutex};
+        std::vector<const HangWork*> pending;
+        for (const auto& work : hang_ring) {
+            if (work.tick > known) {
+                pending.push_back(&work);
+            }
+        }
+        std::ranges::sort(pending, {}, [](const HangWork* w) { return w->tick; });
+        for (size_t i = 0; i < pending.size() && i < 3; ++i) {
+            const HangWork& w = *pending[i];
+            std::string list;
+            for (u32 s = 0; s < w.num; ++s) {
+                list += fmt::format(" {:016x}", w.shaders[s]);
+            }
+            LOG_CRITICAL(Render_Vulkan, "HANG WATCH: pending tick {} draws={} dispatches={} shaders({}):{}",
+                         w.tick, w.draws, w.dispatches, w.num, list);
+        }
+    }
 }
 
 Scheduler::~Scheduler() {
+    if (hang_thread.joinable()) {
+        hang_thread.request_stop();
+        hang_thread.join();
+    }
     if (trace_query_pool) {
         WaitWorker();
         worker_thread.request_stop();
@@ -590,6 +655,14 @@ void Scheduler::TraceShader(u64 hash, u32 stage) {
 }
 
 void Scheduler::TraceGraphicsPipeline(const std::array<u64, 6>& hashes) {
+    if (hang_watch) {
+        Record([this, hashes](vk::CommandBuffer) {
+            ++hang_work.draws;
+            for (const u64 hash : hashes) {
+                HangNote(hash);
+            }
+        });
+    }
     if (!trace_query_pool) {
         return;
     }
@@ -605,6 +678,12 @@ void Scheduler::TraceGraphicsPipeline(const std::array<u64, 6>& hashes) {
 }
 
 void Scheduler::TraceComputePipeline(u64 hash) {
+    if (hang_watch) {
+        Record([this, hash](vk::CommandBuffer) {
+            ++hang_work.dispatches;
+            HangNote(hash);
+        });
+    }
     if (!trace_query_pool) {
         return;
     }
@@ -802,6 +881,12 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
         }
         if (trace_query_pool) {
             trace_work = {};
+        }
+        if (hang_watch) {
+            hang_work.tick = signal_value;
+            std::scoped_lock lk{hang_mutex};
+            hang_ring[hang_ring_next++ % hang_ring.size()] = hang_work;
+            hang_work = {};
         }
         cmdbuf.End();
 
