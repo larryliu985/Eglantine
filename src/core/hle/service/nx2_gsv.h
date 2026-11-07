@@ -241,6 +241,9 @@ private:
         u32 syncpoint{};
         std::atomic<bool> pending{};
         Tegra::Host1x::SyncpointManager::ActionHandle handle{};
+        /// Changes (under SharedState::mutex) with each request and cancel: an action of an
+        /// earlier request that runs late does not signal the slot's next one.
+        u64 generation{};
     };
 
     // Outlives the session (actions hold a reference): signalling happens under `mutex` and only
@@ -273,18 +276,24 @@ private:
         Cancel(request);
         // A new request starts unsignalled. Slots are reused by different client objects: title 1's
         // movie player got slot 0 after NVN's fence waits had left it signalled, took that as a
-        // decoded frame and aborted when the decoder had none.
-        event->Clear(system.Kernel());
-        request.syncpoint = syncpoint;
-        request.pending = true;
+        // decoded frame and aborted when the decoder had none. Under the lock the actions signal
+        // under, so the previous request's action cannot signal after this clear.
+        u64 generation{};
+        {
+            std::scoped_lock lk{m_shared->mutex};
+            event->Clear(system.Kernel());
+            generation = ++request.generation;
+            request.syncpoint = syncpoint;
+            request.pending = true;
+        }
         auto& manager = system.Host1x().GetSyncpointManager();
         // The action runs on the GPU thread under the manager's lock, or inline if the value is
         // already reached.
         request.handle = manager.RegisterGuestAction(
             syncpoint, static_cast<u32>(value),
-            [shared = m_shared, &kernel = system.Kernel(), &request, event] {
+            [shared = m_shared, &kernel = system.Kernel(), &request, event, generation] {
                 std::scoped_lock lk{shared->mutex};
-                if (!shared->alive) {
+                if (!shared->alive || request.generation != generation || !request.pending) {
                     return;
                 }
                 request.pending = false;
@@ -315,7 +324,15 @@ private:
 
     /// Returns true if the request was still pending.
     bool Cancel(SlotRequest& request) {
-        if (request.pending.exchange(false)) {
+        bool was_pending{};
+        {
+            // An action that already took the lock signals first; any later one sees the new
+            // generation (or no pending request) and does nothing.
+            std::scoped_lock lk{m_shared->mutex};
+            ++request.generation;
+            was_pending = request.pending.exchange(false);
+        }
+        if (was_pending) {
             system.Host1x().GetSyncpointManager().DeregisterGuestAction(request.syncpoint,
                                                                         request.handle);
             return true;
