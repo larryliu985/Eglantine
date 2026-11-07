@@ -24,6 +24,7 @@
 
 #include <fmt/format.h>
 
+#include "video_core/diag_timers.h"
 #include "video_core/renderer_vulkan/renderer_vulkan.h"
 
 #include "common/assert.h"
@@ -2788,17 +2789,32 @@ void RasterizerVulkan::TickFrame() {
     ComputePipeline::TickUpscalerTrace();
     draw_counter = 0;
     pending_native_work = false;
-    pipeline_cache.TickFrame();
-    guest_descriptor_queue.TickFrame();
-    compute_pass_descriptor_queue.TickFrame();
-    descriptor_buffer_ring.TickFrame();
-    fence_manager.TickFrame();
-    staging_pool.TickFrame();
+    namespace Diag = VideoCommon::DiagTimers;
     {
+        Diag::Scope scope{Diag::Id::TickPipeline};
+        pipeline_cache.TickFrame();
+    }
+    {
+        Diag::Scope scope{Diag::Id::TickDescriptors};
+        guest_descriptor_queue.TickFrame();
+        compute_pass_descriptor_queue.TickFrame();
+        descriptor_buffer_ring.TickFrame();
+    }
+    {
+        Diag::Scope scope{Diag::Id::TickFence};
+        fence_manager.TickFrame();
+    }
+    {
+        Diag::Scope scope{Diag::Id::TickStaging};
+        staging_pool.TickFrame();
+    }
+    {
+        Diag::Scope scope{Diag::Id::TickTexture};
         std::scoped_lock lock{texture_cache.mutex};
         texture_cache.TickFrame();
     }
     {
+        Diag::Scope scope{Diag::Id::TickBuffer};
         std::scoped_lock lock{buffer_cache.mutex};
         buffer_cache.TickFrame();
     }
