@@ -1,3 +1,5 @@
+#include <map>
+#include <mutex>
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -339,7 +341,57 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
             GequalMetWithoutDrain(dma_pusher, acquire.address, acquire.value)) {
             return;
         }
+        // EDEN_DIAG_ACQUIRE: what the drained acquires wait on (diagnostic).
+        static const bool diag_acquire = std::getenv("EDEN_DIAG_ACQUIRE") != nullptr;
+        u32 diag_pre = 0;
+        bool diag_writers = false, diag_gpu_written = false;
+        if (diag_acquire) {
+            diag_pre = dma_pusher.memory_manager.Read<u32>(acquire.address);
+            diag_writers = VideoCommon::GpuSplit::Get().HasQueuedMemoryWriters(acquire.address,
+                                                                               acquire.address + 4);
+            const auto device = dma_pusher.memory_manager.GpuToCpuAddress(acquire.address);
+            diag_gpu_written = device && Nx2IsGpuWritten(*device);
+        }
         DrainBack();
+        if (diag_acquire) {
+            static std::array<std::atomic<u64>, 64> counts{};
+            static std::atomic<u64> total{};
+            static std::mutex addresses_mutex;
+            static std::map<GPUVAddr, std::array<u64, 4>> addresses;
+            const u32 post = dma_pusher.memory_manager.Read<u32>(acquire.address);
+            const u32 opi = op == GpuSemaphoreOperation::AcquireEqual ? 0 : op == GpuSemaphoreOperation::AcquireGequal ? 1 : 2;
+            const u32 index = opi * 16 + (acquire.Matches(diag_pre) ? 8 : 0) + (diag_writers ? 4 : 0) +
+                              (diag_gpu_written ? 2 : 0) + (post != diag_pre ? 1 : 0);
+            counts[index].fetch_add(1, std::memory_order_relaxed);
+            {
+                std::scoped_lock lk{addresses_mutex};
+                auto& entry = addresses[acquire.address];
+                ++entry[0];
+                entry[1] = acquire.value;
+                entry[2] = diag_pre;
+                entry[3] = post;
+            }
+            if ((total.fetch_add(1) & 0x3fff) == 0x3fff) {
+                std::string text;
+                for (u32 i = 0; i < 64; ++i) {
+                    if (const u64 n = counts[i].load()) {
+                        text += fmt::format(" [{} pre{} writers{} gpuw{} changed{}]={}",
+                                            i / 16 == 0 ? "eq" : i / 16 == 1 ? "ge" : "mask",
+                                            (i >> 3) & 1, (i >> 2) & 1, (i >> 1) & 1, i & 1, n);
+                    }
+                }
+                LOG_INFO(HW_GPU, "Acquire diag:{}", text);
+                std::scoped_lock lk{addresses_mutex};
+                std::string top;
+                u32 shown = 0;
+                for (const auto& [address, entry] : addresses) {
+                    if (entry[0] < 64 || shown++ >= 24) continue;
+                    top += fmt::format(" {:#x}:n{} v{:#x} pre{:#x} post{:#x}", address, entry[0],
+                                       entry[1], entry[2], entry[3]);
+                }
+                LOG_INFO(HW_GPU, "Acquire diag addresses ({}):{}", addresses.size(), top);
+            }
+        }
         if (acquire.Matches(ReadSemaphoreWord(dma_pusher, acquire.address))) {
             VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquireMetAfterDrain, 1);
             return;
