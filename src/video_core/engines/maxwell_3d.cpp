@@ -35,8 +35,10 @@
 #include "video_core/query_dma.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/textures/texture.h"
-#ifdef ARCHITECTURE_x86_64
+#if defined(ARCHITECTURE_x86_64)
 #include "video_core/macro_turing_jit.h"
+#elif defined(ARCHITECTURE_arm64)
+#include "video_core/macro_turing_jit_a64.h"
 #endif
 
 namespace Tegra::Engines {
@@ -1804,13 +1806,20 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
             }
             return true;
         };
-#ifdef ARCHITECTURE_x86_64
-        if (!engine.native_jit) {
+#if defined(ARCHITECTURE_x86_64) || defined(ARCHITECTURE_arm64)
+        static const bool use_jit = [] {
+            const char* value = std::getenv("EDEN_NX2_MME_JIT");
+            return value == nullptr || value[0] != '0';
+        }();
+        if (use_jit && !engine.native_jit) {
             engine.native_jit = std::make_shared<TuringMacroJit>();
         }
-        engine.native_jit->Prepare(engine.native_code, engine.native_code_generation);
-        const auto result = engine.native_jit->Execute(
-            start, fs.parameters, std::span<u32>{native_data_ram}, read, emit);
+        const auto result =
+            use_jit && engine.native_jit->Prepare(engine.native_code, engine.native_code_generation)
+                ? engine.native_jit->Execute(start, fs.parameters,
+                                             std::span<u32>{native_data_ram}, read, emit)
+                : engine.native_interpreter.Execute(engine.native_code, start, fs.parameters,
+                                                    read, emit);
 #else
         const auto result =
             engine.native_interpreter.Execute(engine.native_code, start, fs.parameters, read, emit);
