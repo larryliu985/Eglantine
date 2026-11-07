@@ -1,3 +1,6 @@
+#include <algorithm>
+#include <mutex>
+#include <unordered_map>
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -294,6 +297,30 @@ struct GPU::Impl {
         if (preserve_gpu_writes) {
             VideoCore::RasterizerInterface* rasterizer = renderer->ReadRasterizer();
             if (!rasterizer->TryCacheInvalidation(addr, size)) {
+                // EDEN_DIAG_INVAL: which pages the guest writes while the GPU's data is on them.
+                if (static const bool diag = std::getenv("EDEN_DIAG_INVAL") != nullptr; diag) {
+                    static std::mutex diag_mutex;
+                    static std::unordered_map<u64, std::pair<u64, u64>> pages; // count, bytes
+                    static u64 events{};
+                    std::scoped_lock diag_lock{diag_mutex};
+                    auto& entry = pages[addr >> 12];
+                    ++entry.first;
+                    entry.second += size;
+                    if ((++events & 0x3ff) == 0) {
+                        std::vector<std::pair<u64, std::pair<u64, u64>>> sorted(pages.begin(), pages.end());
+                        std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
+                            return a.second.first > b.second.first;
+                        });
+                        std::string text;
+                        for (size_t i = 0; i < sorted.size() && i < 12; ++i) {
+                            text += fmt::format(" {:#x}:{}x/{}B", sorted[i].first << 12,
+                                                sorted[i].second.first,
+                                                sorted[i].second.second / sorted[i].second.first);
+                        }
+                        LOG_INFO(HW_GPU, "Diag inval: {} events, {} pages; top (page:count/avg bytes):{}",
+                                 events, pages.size(), text);
+                    }
+                }
                 const u64 fence = RequestSyncOperation([rasterizer, addr, size] {
                     VideoCommon::DiagTimers::Scope diag_scope{VideoCommon::DiagTimers::Id::SyncInvalidate};
                     rasterizer->FlushRegion(addr, size, VideoCommon::CacheType::BufferCache);
