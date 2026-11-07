@@ -4,6 +4,8 @@
 #pragma once
 
 #include <algorithm>
+#include "common/scope_exit.h"
+#include "core/hle/service/nx2_syncpoint_waker.h"
 #include "common/nx2_timeline.h"
 #include <array>
 #include <thread>
@@ -2088,20 +2090,23 @@ private:
             // Woken by the GPU thread as it reaches the fence. Polling with 200 us sleeps slept
             // about 1 ms per check on Windows, added to every frame. An action left registered
             // after a timeout fires later on a state nobody waits on.
-            struct Wake {
-                std::mutex mutex;
-                std::condition_variable cv;
-                bool done{};
-            };
-            auto wake = std::make_shared<Wake>();
-            syncpoints.RegisterGuestAction(fence_id, fence_value, [wake] {
-                {
-                    std::scoped_lock lk{wake->mutex};
-                    wake->done = true;
-                }
-                wake->cv.notify_all();
-            });
+            // The action runs on the GPU thread that increments the syncpoint: it hands the
+            // wake to SyncpointWaker instead of taking this thread's mutex itself.
+            auto wake = std::make_shared<Service::Nx2::SyncpointWaker::Wake>();
+            const auto handle = syncpoints.RegisterGuestAction(
+                fence_id, fence_value,
+                [wake] { Service::Nx2::SyncpointWaker::Get().Post(wake); });
             std::unique_lock lk{wake->mutex};
+            // Leaves no action behind after a timeout (they piled up in the syncpoint's list).
+            SCOPE_EXIT {
+                const bool done = lk.owns_lock() ? wake->done : true;
+                if (lk.owns_lock()) {
+                    lk.unlock();
+                }
+                if (!done) {
+                    syncpoints.DeregisterGuestAction(fence_id, handle);
+                }
+            };
             // Title 1's channels resume and suspend again while they wait on this thread, so any
             // suspension counts, not only an unbroken one.
             bool gpu_waited = false;
