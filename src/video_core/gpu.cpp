@@ -146,7 +146,13 @@ struct GPU::Impl {
 
     void WaitForSyncOperation(const u64 fence) {
         std::unique_lock lck{sync_request_mutex};
-        sync_request_cv.wait(lck, [this, fence] { return CurrentSyncRequestFence() >= fence; });
+        // The GPU thread stops first at shutdown (NotifyShutdown, then SuspendEmulation): a guest
+        // core waiting here from its memory fault handler would never be released, and the
+        // suspension that waits for that core hung the restart.
+        sync_request_cv.wait(lck, [this, fence] {
+            return CurrentSyncRequestFence() >= fence ||
+                   shutting_down.load(std::memory_order_relaxed);
+        });
     }
 
     void WaitForIdle() {
@@ -191,9 +197,15 @@ struct GPU::Impl {
 
     void NotifyShutdown() {
         gpu_thread.NotifyShutdown();
-        std::unique_lock lk{sync_mutex};
-        shutting_down.store(true, std::memory_order::relaxed);
-        sync_cv.notify_all();
+        {
+            std::unique_lock lk{sync_mutex};
+            shutting_down.store(true, std::memory_order::relaxed);
+            sync_cv.notify_all();
+        }
+        // Release the guest cores waiting in WaitForSyncOperation (the flag is set before this
+        // lock is taken, so a waiter either sees it or is woken here).
+        std::scoped_lock request_lock{sync_request_mutex};
+        sync_request_cv.notify_all();
     }
 
     /// Obtain the CPU Context
