@@ -40,8 +40,10 @@
 #include "video_core/memory_manager.h"
 #include "video_core/native_query_trace.h"
 #include "video_core/oot_network.h"
-#ifdef ARCHITECTURE_x86_64
+#if defined(ARCHITECTURE_x86_64)
 #include "video_core/macro_turing_jit.h"
+#elif defined(ARCHITECTURE_arm64)
+#include "video_core/macro_turing_jit_a64.h"
 #endif
 #include "video_core/rasterizer_interface.h"
 #include "video_core/textures/decoders.h"
@@ -657,18 +659,18 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
             CallMethod(system, address, value, true);
             return true;
         };
-#ifdef ARCHITECTURE_x86_64
+#if defined(ARCHITECTURE_x86_64) || defined(ARCHITECTURE_arm64)
         // Compiled macro code, as for 3D macros (macro_turing_jit.h); EDEN_NX2_MME_JIT=0 off.
         static const bool use_jit = [] {
             const char* value = std::getenv("EDEN_NX2_MME_JIT");
             return value == nullptr || value[0] != '0';
         }();
-        if (use_jit && !watched) {
-            if (!native_macro->native_jit) {
-                native_macro->native_jit = std::make_shared<TuringMacroJit>();
-            }
+        if (use_jit && !watched && !native_macro->native_jit) {
+            native_macro->native_jit = std::make_shared<TuringMacroJit>();
+        }
+        if (use_jit && !watched &&
             native_macro->native_jit->Prepare(native_macro->native_code,
-                                              native_macro->native_code_generation);
+                                              native_macro->native_code_generation)) {
             const auto result = native_macro->native_jit->Execute(
                 start, native_parameters,
                 std::span<u32>{*native_macro->native_interpreter.active_dram},
@@ -2949,13 +2951,21 @@ void KeplerCompute::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& s
         }
         return true;
     };
-#ifdef ARCHITECTURE_x86_64
-    if (!macro.native_jit) {
+#if defined(ARCHITECTURE_x86_64) || defined(ARCHITECTURE_arm64)
+    static const bool use_jit = [] {
+        const char* value = std::getenv("EDEN_NX2_MME_JIT");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (use_jit && !macro.native_jit) {
         macro.native_jit = std::make_shared<TuringMacroJit>();
     }
-    macro.native_jit->Prepare(macro.native_code, macro.native_code_generation);
-    const auto result = macro.native_jit->Execute(
-        start, fs.parameters, std::span<u32>{*macro.native_interpreter.active_dram}, read, emit);
+    const auto result =
+        use_jit && macro.native_jit->Prepare(macro.native_code, macro.native_code_generation)
+            ? macro.native_jit->Execute(start, fs.parameters,
+                                        std::span<u32>{*macro.native_interpreter.active_dram},
+                                        read, emit)
+            : macro.native_interpreter.Execute(macro.native_code, start, fs.parameters, read,
+                                               emit);
 #else
     const auto result =
         macro.native_interpreter.Execute(macro.native_code, start, fs.parameters, read, emit);
