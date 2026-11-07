@@ -91,12 +91,13 @@ public:
     }
 
     /// Compiles `code` (3 words per instruction) when it differs from what was compiled.
-    void Prepare(std::span<const Word> code, std::uint64_t generation) {
+    bool Prepare(std::span<const Word> code, std::uint64_t generation) {
         if (program && generation == compiled_generation) {
-            return;
+            return true;
         }
         program = std::make_unique<Program>(code);
         compiled_generation = generation;
+        return true;
     }
 
     template <typename Read, typename Emit>
