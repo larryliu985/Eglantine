@@ -1,3 +1,7 @@
+#include <dlfcn.h>
+#include <algorithm>
+#include <chrono>
+#include <string>
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -971,6 +975,46 @@ size_t GpuSplit::Execute(const u64* entry, size_t words) {
     }
     case Kind::Call: {
         const size_t payload = static_cast<size_t>((head >> 8) & 0xffffff);
+        // EDEN_DIAG_CALL_PROFILE: time per deferred function (they run outside the profiler's
+        // zones and make up its "other"), logged every 2^16 calls with offsets into the binary.
+        static const bool call_profile = std::getenv("EDEN_DIAG_CALL_PROFILE") != nullptr;
+        if (call_profile) [[unlikely]] {
+            struct Stat {
+                u64 function;
+                u64 ns;
+                u64 count;
+            };
+            static std::array<Stat, 256> stats{};
+            static u64 calls{};
+            const auto begin = std::chrono::steady_clock::now();
+            reinterpret_cast<void (*)(const u64*)>(entry[1])(entry + 2);
+            const u64 ns = static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                std::chrono::steady_clock::now() - begin)
+                                                .count());
+            for (size_t i = (entry[1] >> 4) % stats.size(), n = 0; n < stats.size();
+                 i = (i + 1) % stats.size(), ++n) {
+                if (stats[i].function == entry[1] || stats[i].function == 0) {
+                    stats[i].function = entry[1];
+                    stats[i].ns += ns;
+                    ++stats[i].count;
+                    break;
+                }
+            }
+            if ((++calls & 0xffff) == 0) {
+                Dl_info info{};
+                dladdr(reinterpret_cast<void*>(&GpuSplit::Get), &info);
+                const u64 base = reinterpret_cast<u64>(info.dli_fbase);
+                std::array<Stat, 256> sorted = stats;
+                std::ranges::sort(sorted, [](const Stat& a, const Stat& b) { return a.ns > b.ns; });
+                std::string text;
+                for (size_t i = 0; i < 16 && sorted[i].function != 0; ++i) {
+                    text += fmt::format(" {:#x}:{}ms/{}", sorted[i].function - base,
+                                        sorted[i].ns / 1000000, sorted[i].count);
+                }
+                LOG_INFO(HW_GPU, "Back deferred calls (offset:ms/count, cumulative):{}", text);
+            }
+            return 2 + payload;
+        }
         reinterpret_cast<void (*)(const u64*)>(entry[1])(entry + 2);
         return 2 + payload;
     }

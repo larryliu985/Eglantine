@@ -12,6 +12,7 @@
 #include <memory>
 #include <utility>
 
+#include "video_core/diag_timers.h"
 #include "common/assert.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
@@ -112,7 +113,11 @@ struct GPU::Impl {
         std::vector<std::pair<DAddr, u64>> writes;
         std::function<void(PAddr, size_t)> callback_writes(
             [&writes](PAddr address, size_t size) { writes.emplace_back(address, size); });
+        VideoCommon::DiagTimers::Scope diag_scope{VideoCommon::DiagTimers::Id::GpuCacheInvalidate};
         system.GatherGPUDirtyMemory(callback_writes);
+        if (VideoCommon::DiagTimers::Enabled() && !writes.empty()) {
+            VideoCommon::DiagTimers::Add(VideoCommon::DiagTimers::Id::GpuCacheRanges, 0, writes.size());
+        }
         if (!writes.empty()) {
             renderer->ReadRasterizer()->OnCacheInvalidations(writes);
         }
@@ -252,6 +257,7 @@ struct GPU::Impl {
     /// OnCPURead without its Preflushable shortcut: the guest CPU reads this range now.
     void ForceCPURead(DAddr addr, u64 size) {
         const u64 fence = RequestSyncOperation([this, addr, size]() {
+            VideoCommon::DiagTimers::Scope diag_scope{VideoCommon::DiagTimers::Id::SyncForceRead};
             InvalidateGPUCache();
             renderer->ReadRasterizer()->FlushRegion(addr, size);
         });
@@ -273,6 +279,7 @@ struct GPU::Impl {
                      reads.load(std::memory_order_relaxed));
         }
         const u64 fence = RequestSyncOperation([this, raster_area]() {
+            VideoCommon::DiagTimers::Scope diag_scope{VideoCommon::DiagTimers::Id::SyncCpuRead};
             // Apply collected guest writes before downloading GPU data over guest memory.
             InvalidateGPUCache();
             renderer->ReadRasterizer()->FlushRegion(raster_area.start_address, raster_area.end_address - raster_area.start_address);
@@ -288,6 +295,7 @@ struct GPU::Impl {
             VideoCore::RasterizerInterface* rasterizer = renderer->ReadRasterizer();
             if (!rasterizer->TryCacheInvalidation(addr, size)) {
                 const u64 fence = RequestSyncOperation([rasterizer, addr, size] {
+                    VideoCommon::DiagTimers::Scope diag_scope{VideoCommon::DiagTimers::Id::SyncInvalidate};
                     rasterizer->FlushRegion(addr, size, VideoCommon::CacheType::BufferCache);
                     rasterizer->OnCacheInvalidation(addr, size);
                 });
@@ -334,6 +342,7 @@ struct GPU::Impl {
         pending_composite_fence = RequestSyncOperation(
             [this, current_request_counter, num_fences, composite_layers = std::move(layers),
              composite_fences = std::move(fences)] {
+                VideoCommon::DiagTimers::Scope diag_scope{VideoCommon::DiagTimers::Id::SyncComposite};
                 if (num_fences == 0) {
                     renderer->Composite(composite_layers);
                     return;

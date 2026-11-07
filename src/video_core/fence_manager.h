@@ -20,6 +20,7 @@
 #include <vector>
 #include <queue>
 
+#include "video_core/diag_timers.h"
 #include "common/common_types.h"
 #include "common/logging.h"
 #include "common/settings.h"
@@ -153,8 +154,12 @@ public:
             LOG_ERROR(HW_GPU, "Signal of syncpoint {} past the table, ignored", value);
             return;
         }
-        syncpoint_manager.IncrementGuest(value);
+        {
+            VideoCommon::DiagTimers::Scope diag_scope{VideoCommon::DiagTimers::Id::SyncPointGuest};
+            syncpoint_manager.IncrementGuest(value);
+        }
         std::function<void()> func([this, value] { syncpoint_manager.IncrementHost(value); });
+        VideoCommon::DiagTimers::Scope diag_scope{VideoCommon::DiagTimers::Id::SyncPointFence};
         SignalFence(std::move(func));
     }
 
