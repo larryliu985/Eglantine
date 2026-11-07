@@ -18,11 +18,13 @@ namespace VideoCommon::DiagTimers {
 
 enum class Id : unsigned {
     SyncComposite, SyncCpuRead, SyncForceRead, SyncInvalidate, SyncOther,
-    SyncPointGuest, SyncPointFence, GpuCacheInvalidate, GpuCacheRanges, Count,
+    SyncPointGuest, SyncPointFence, GpuCacheInvalidate, GpuCacheRanges, SyncpointLock,
+    SyncpointActions, SyncpointNotify, Count,
 };
 inline constexpr std::array<const char*, static_cast<size_t>(Id::Count)> names{
     "sync composite", "sync cpu read", "sync force read", "sync invalidate", "sync other",
-    "syncpoint guest", "syncpoint fence", "gpu cache invalidate", "(ranges)"};
+    "syncpoint guest", "syncpoint fence", "gpu cache invalidate", "(ranges)", "syncpoint lock wait",
+    "syncpoint actions", "syncpoint notify"};
 
 inline bool Enabled() {
     static const bool enabled = std::getenv("EDEN_DIAG_SYNC") != nullptr;
@@ -67,7 +69,7 @@ inline void Add(Id id, unsigned long long ns, unsigned long long count = 1) {
 
 struct Scope {
     Id id;
-    std::chrono::steady_clock::time_point begin;
+    std::chrono::steady_clock::time_point begin{};
     bool on;
     explicit Scope(Id id_) : id{id_}, on{Enabled()} {
         if (on) begin = std::chrono::steady_clock::now();

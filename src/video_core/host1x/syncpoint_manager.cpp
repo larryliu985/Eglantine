@@ -4,6 +4,8 @@
 // SPDX-FileCopyrightText: 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <chrono>
+#include "video_core/diag_timers.h"
 #include "common/logging.h"
 #include "video_core/host1x/syncpoint_manager.h"
 
@@ -84,15 +86,29 @@ void SyncpointManager::Increment(std::atomic<u32>& syncpoint, std::condition_var
                                  std::list<RegisteredAction>& action_storage) {
     auto new_value{syncpoint.fetch_add(1, std::memory_order_acq_rel) + 1};
 
+    namespace Diag = VideoCommon::DiagTimers;
+    const bool diag = Diag::Enabled();
+    const auto lock_begin = diag ? std::chrono::steady_clock::now()
+                                 : std::chrono::steady_clock::time_point{};
     std::scoped_lock lk(guard);
+    if (diag) {
+        Diag::Add(Diag::Id::SyncpointLock,
+                  static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                      std::chrono::steady_clock::now() - lock_begin)
+                                                      .count()));
+    }
     auto it = action_storage.begin();
     while (it != action_storage.end()) {
         if (it->expected_value > new_value) {
             break;
         }
-        it->action();
+        {
+            Diag::Scope action_scope{Diag::Id::SyncpointActions};
+            it->action();
+        }
         it = action_storage.erase(it);
     }
+    Diag::Scope notify_scope{Diag::Id::SyncpointNotify};
     wait_cv.notify_all();
 }
 
