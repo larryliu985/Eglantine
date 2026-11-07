@@ -165,7 +165,6 @@ private:
     /// Pages known to be all ones (FillPages).
     size_t full_begin{};
     size_t full_end{};
-    bool tracked{};
 };
 
 } // namespace VideoCommon
