@@ -3402,6 +3402,17 @@ private:
     void FrontWrite(VideoCommon::GpuSplit& split, FrontState& state, u32 method, u32 argument,
                     bool is_last_call, bool from_macro);
     void FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split, FrontState& state);
+public:
+    /// Split front: whether the 3D macro `method`, called with `count` parameters that GPU work
+    /// wrote, only copies the first into the draw's vertex count (dry runs on copies of its
+    /// state, nx2_indirect_grid.h). Then the parameters can stay placeholders.
+    bool FrontMacroCountsDraw(Core::System& system, VideoCommon::GpuSplit& split, u32 method,
+                              u32 count);
+private:
+    void FrontTrackInstanceLoop(FrontState& state, u32 method, u32 value);
+    bool FrontSkipsLoopWrite(FrontState& state, u32 method, u32 value, bool shadow_kept);
+    void FrontNoteMemoryWrite(VideoCommon::GpuSplit& split, FrontState& state, u32 method,
+                              const u32* words, u32 count);
     void FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& state, u32 macro, u32 method,
                       u32 count);
     /// Tells the split a report just sent releases a known payload (GpuSplit::NoteRelease).

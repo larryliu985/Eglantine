@@ -114,11 +114,13 @@ public:
                          VideoCommon::CacheType which = VideoCommon::CacheType::All) override;
     VideoCore::RasterizerDownloadArea GetFlushArea(DAddr addr, u64 size) override;
     bool HasPendingQueries(DAddr addr, u64 size) override;
+    bool HasCachedReports(DAddr addr, u64 size) override;
     void InvalidateRegion(DAddr addr, u64 size,
                           VideoCommon::CacheType which = VideoCommon::CacheType::All) override;
     void PrepareRegionWrite(DAddr addr, u64 size, VideoCommon::CacheType which) override;
     void InnerInvalidation(std::span<const std::pair<DAddr, std::size_t>> sequences) override;
     void OnCacheInvalidation(DAddr addr, u64 size) override;
+    void OnCacheInvalidations(std::span<const std::pair<DAddr, u64>> ranges) override;
     bool TryCacheInvalidation(DAddr addr, u64 size) override;
     bool OnCPUWrite(DAddr addr, u64 size) override;
     void InvalidateGPUCache() override;
@@ -158,6 +160,8 @@ public:
     Tegra::Engines::AccelerateDMAInterface& AccessAccelerateDMA() override;
     void AccelerateInlineToMemory(GPUVAddr address, size_t copy_size,
                                   std::span<const u8> memory) override;
+    void AccelerateInlineToMemoryImpl(GPUVAddr address, size_t copy_size,
+                                      std::span<const u8> memory);
     void LoadDiskResources(u64 title_id, std::stop_token stop_loading,
                            const VideoCore::DiskResourceLoadCallback& callback) override;
 
@@ -171,6 +175,9 @@ public:
                                                             u32 pixel_stride);
 
 private:
+    /// False when no page of the range was ever written by the GPU through the buffer cache.
+    bool MayBeGpuModified(DAddr addr, u64 size);
+
     static constexpr const u64 NEEDS_D24[] = {
         0x01006A800016E000ULL, // SSBU
         0x0100E95004038000ULL, // XC2
@@ -188,6 +195,9 @@ private:
     void CaptureIndirectTrace();
     void CollectIndirectTrace();
     void TraceDrawFailure(std::string_view reason);
+    bool IsNx2IndirectReset(bool is_indexed, u32 instance_count);
+    /// A compute dispatch was recorded since the last barrier for GPU-counted draws.
+    bool compute_since_count_barrier{};
     bool TryNx2IndirectReset(bool is_indexed, u32 instance_count);
 
     void FlushWork();
@@ -196,7 +206,7 @@ private:
 
     /// Records the copies of the command list pages the work just recorded wrote and submits, so
     /// the GPU makes them now (BufferCache::Nx2CopyListPages).
-    void SubmitNx2ListCopies();
+    void SubmitNx2ListCopies(u64 writer);
 
     void UpdateDynamicStates(GraphicsPipeline* draw_pipeline = nullptr);
 
@@ -269,8 +279,6 @@ private:
     FenceManager fence_manager;
     FrameDump frame_dump;
     FlashWatch flash_watch;
-
-    vk::Event wfi_event;
 
     boost::container::static_vector<u32, MAX_IMAGE_VIEWS> image_view_indices;
     std::array<VideoCommon::ImageViewId, MAX_IMAGE_VIEWS> image_view_ids;

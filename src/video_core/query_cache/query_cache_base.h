@@ -81,6 +81,14 @@ public:
         return mask;
     }
 
+    /// Whether a report in the region is still listed (pending host results, or written and not
+    /// unregistered yet). Only the cache mutex: callable from the split front.
+    [[nodiscard]] bool HasCachedReports(VAddr addr, size_t size) {
+        bool result = false;
+        IterateCache<false>(addr, size, [&result](QueryLocation) { result = true; });
+        return result;
+    }
+
     /// Return true when a CPU region is modified from the GPU
     [[nodiscard]] bool IsRegionGpuModified(VAddr addr, size_t size) {
         bool result = false;
