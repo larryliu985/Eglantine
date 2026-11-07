@@ -251,4 +251,7 @@ private:
     std::optional<PipelineBuild> build;
 };
 
+/// EDEN_NX2_DRAW_REUSE_PROBE: ends a frame of the draw reuse probe (vk_graphics_pipeline.cpp).
+void NoteDrawReuseProbeFrame();
+
 } // namespace Vulkan
