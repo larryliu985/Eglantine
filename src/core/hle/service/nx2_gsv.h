@@ -1906,6 +1906,15 @@ private:
                 m_stats.frame_us += frame;
                 m_stats.max_frame_us = (std::max)(m_stats.max_frame_us, frame);
                 m_stats.hitches += frame > 100'000 ? 1 : 0;
+                // Each long hitch with its end on the monotonic clock (steady_clock), to line up
+                // with a profile taken meanwhile (perf record -k CLOCK_MONOTONIC).
+                if (frame > 150'000) {
+                    LOG_WARNING(Service, "nx2:vi2 hitch: {} ms between presents, ended at monotonic {} ns",
+                                frame / 1000,
+                                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    entered.time_since_epoch())
+                                    .count());
+                }
             }
             m_stats.last_present = entered;
             if (++m_stats.presents == 600) {
