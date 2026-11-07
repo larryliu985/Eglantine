@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <algorithm>
+#include <bit>
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -642,7 +643,7 @@ struct Memory::Impl {
                 ++nce_trap_generation[page];
             }
             armed_read_trap_count.fetch_add(1, std::memory_order_relaxed);
-            if (!cached || !armed_read_traps.insert(page).second) {
+            if (!cached || !armed_read_traps.Insert(page)) {
                 armed_read_trap_count.fetch_sub(1, std::memory_order_relaxed);
                 protect_run();
                 continue;
@@ -660,8 +661,8 @@ struct Memory::Impl {
             return false;
         }
         std::scoped_lock lk{read_trap_mutex};
-        const auto it = armed_read_traps.lower_bound(vaddr >> YUZU_PAGEBITS);
-        return it != armed_read_traps.end() && *it <= ((vaddr + size - 1) >> YUZU_PAGEBITS);
+        return armed_read_traps.AnyIn(vaddr >> YUZU_PAGEBITS,
+                                      ((vaddr + size - 1) >> YUZU_PAGEBITS) + 1);
     }
 
     /// Takes read permission away again from armed pages that were just cached again.
@@ -671,10 +672,9 @@ struct Memory::Impl {
         }
         std::scoped_lock lk{read_trap_mutex};
         const u64 page_end = ((vaddr + size - 1) >> YUZU_PAGEBITS) + 1;
-        for (auto it = armed_read_traps.lower_bound(vaddr >> YUZU_PAGEBITS);
-             it != armed_read_traps.end() && *it < page_end; ++it) {
-            host_buffer->Protect(*it << YUZU_PAGEBITS, YUZU_PAGESIZE, Common::MemoryPermission{});
-        }
+        armed_read_traps.ForEach(vaddr >> YUZU_PAGEBITS, page_end, [&](u64 page) {
+            host_buffer->Protect(page << YUZU_PAGEBITS, YUZU_PAGESIZE, Common::MemoryPermission{});
+        });
     }
 
     /// A slow-path read of a cached page: its trap, if any, has done its job.
@@ -684,14 +684,12 @@ struct Memory::Impl {
         }
         std::scoped_lock lk{read_trap_mutex};
         const u64 page_end = ((vaddr + size - 1) >> YUZU_PAGEBITS) + 1;
-        auto it = armed_read_traps.lower_bound(vaddr >> YUZU_PAGEBITS);
-        while (it != armed_read_traps.end() && *it < page_end) {
+        armed_read_traps.ForEachErase(vaddr >> YUZU_PAGEBITS, page_end, [&](u64 page) {
             // Still cached (this read came through the rasterizer path): writes stay trapped.
-            host_buffer->Protect(*it << YUZU_PAGEBITS, YUZU_PAGESIZE,
+            host_buffer->Protect(page << YUZU_PAGEBITS, YUZU_PAGESIZE,
                                  Common::MemoryPermission::Read);
-            it = armed_read_traps.erase(it);
             armed_read_trap_count.fetch_sub(1, std::memory_order_relaxed);
-        }
+        });
     }
 
     /**
@@ -1033,7 +1031,7 @@ struct Memory::Impl {
         u64 generation = 0;
         {
             std::scoped_lock lk{read_trap_mutex};
-            if (!armed_read_traps.contains(page)) {
+            if (!armed_read_traps.Contains(page)) {
                 return false;
             }
             generation = nce_trap_generation[page];
@@ -1082,11 +1080,11 @@ struct Memory::Impl {
             return true;
         }
         nce_trap_flushing.erase(flushing);
-        if (nce_trap_generation[page] != generation || !armed_read_traps.contains(page)) {
+        if (nce_trap_generation[page] != generation || !armed_read_traps.Contains(page)) {
             return true;
         }
         host_buffer->Protect(page << YUZU_PAGEBITS, YUZU_PAGESIZE, Common::MemoryPermission::Read);
-        armed_read_traps.erase(page);
+        armed_read_traps.Erase(page);
         armed_read_trap_count.fetch_sub(1, std::memory_order_relaxed);
         nce_trap_generation.erase(page);
         return true;
@@ -1157,7 +1155,108 @@ struct Memory::Impl {
     std::array<VideoCore::RasterizerDownloadArea, Core::Hardware::NUM_CPU_CORES> rasterizer_read_areas{};
     std::array<u64, Core::Hardware::NUM_CPU_CORES> read_area_generations{};
     std::atomic<u64> read_trap_generation{};
-    std::set<u64> armed_read_traps;
+    // Pages by number, as a two-level bitmap: arming tests pages already armed once per GPU write
+    // (a std::set insert there was ~2% of the GPU back thread).
+    class PageSet {
+    public:
+        /// True when the page was not in the set.
+        bool Insert(u64 page) {
+            u64& word = Word(page, true);
+            const u64 bit = u64{1} << (page & 63);
+            const bool added = (word & bit) == 0;
+            word |= bit;
+            return added;
+        }
+        bool Contains(u64 page) const {
+            const u64* word = WordIfPresent(page);
+            return word && (*word >> (page & 63)) & 1;
+        }
+        void Erase(u64 page) {
+            if (u64* word = const_cast<u64*>(WordIfPresent(page))) {
+                *word &= ~(u64{1} << (page & 63));
+            }
+        }
+        bool AnyIn(u64 begin, u64 end) const {
+            bool any = false;
+            Scan(begin, end, [&](u64*, u64) { any = true; return false; });
+            return any;
+        }
+        /// Calls func(page) for the pages in [begin, end), in order.
+        template <typename Func>
+        void ForEach(u64 begin, u64 end, Func&& func) const {
+            Scan(begin, end, [&](u64*, u64 page) { func(page); return true; });
+        }
+        /// As ForEach, removing each page after func(page).
+        template <typename Func>
+        void ForEachErase(u64 begin, u64 end, Func&& func) {
+            Scan(begin, end, [&](u64* word, u64 page) {
+                func(page);
+                *word &= ~(u64{1} << (page & 63));
+                return true;
+            });
+        }
+
+    private:
+        static constexpr u64 ChunkBits = 15; // 32768 pages (128 MiB) a chunk
+        using Chunk = std::array<u64, (u64{1} << ChunkBits) / 64>;
+
+        u64& Word(u64 page, bool) {
+            const u64 index = page >> ChunkBits;
+            if (index >= chunks.size()) {
+                chunks.resize(index + 1);
+            }
+            auto& chunk = chunks[index];
+            if (!chunk) {
+                chunk = std::make_unique<Chunk>();
+                chunk->fill(0);
+            }
+            return (*chunk)[(page & ((u64{1} << ChunkBits) - 1)) >> 6];
+        }
+        const u64* WordIfPresent(u64 page) const {
+            const u64 index = page >> ChunkBits;
+            if (index >= chunks.size() || !chunks[index]) {
+                return nullptr;
+            }
+            return &(*chunks[index])[(page & ((u64{1} << ChunkBits) - 1)) >> 6];
+        }
+        // func(word, page) for each set page in [begin, end) until it returns false.
+        template <typename Func>
+        void Scan(u64 begin, u64 end, Func&& func) const {
+            u64 page = begin;
+            while (page < end) {
+                const u64 index = page >> ChunkBits;
+                if (index >= chunks.size()) {
+                    return;
+                }
+                const u64 chunk_end = std::min(end, (index + 1) << ChunkBits);
+                if (!chunks[index]) {
+                    page = chunk_end;
+                    continue;
+                }
+                Chunk& chunk = *chunks[index];
+                while (page < chunk_end) {
+                    u64& word = chunk[(page & ((u64{1} << ChunkBits) - 1)) >> 6];
+                    u64 bits = word >> (page & 63);
+                    if (bits == 0) {
+                        page = (page | 63) + 1;
+                        continue;
+                    }
+                    page += std::countr_zero(bits);
+                    if (page >= chunk_end) {
+                        break;
+                    }
+                    if (!func(&word, page)) {
+                        return;
+                    }
+                    ++page;
+                }
+                page = chunk_end;
+            }
+        }
+
+        std::vector<std::unique_ptr<Chunk>> chunks;
+    };
+    PageSet armed_read_traps;
     /// NCE read traps (read_trap_mutex): arm requests per page, and NCE reads flushing it.
     std::unordered_map<u64, u64> nce_trap_generation;
     std::unordered_map<u64, u32> nce_trap_flushing;
