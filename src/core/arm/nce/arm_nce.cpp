@@ -1,3 +1,10 @@
+#include <fmt/format.h>
+#include <string>
+#include <vector>
+#include <algorithm>
+#include <mutex>
+#include <map>
+#include <unordered_map>
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -207,6 +214,48 @@ bool ArmNce::HandleGuestAccessFault(GuestContext* guest_ctx, void* raw_info, voi
         const u64 count = declined.fetch_add(1, std::memory_order_relaxed) + 1;
         if ((count & (count - 1)) == 0) {
             LOG_INFO(Core_ARM, "NCE writes to GPU-written pages left to invalidation: {}", count);
+        }
+    }
+
+    // EDEN_DIAG_FAULT_OFFSETS: where in the page the guest writes when it faults here.
+    if (static const bool diag = std::getenv("EDEN_DIAG_FAULT_OFFSETS") != nullptr; diag) {
+        struct PageStat {
+            u64 count{};
+            u64 min_offset{~u64{0}};
+            u64 max_offset{};
+            std::map<u64, u64> offsets;
+        };
+        static std::mutex diag_mutex;
+        static std::unordered_map<u64, PageStat> pages;
+        static u64 events{};
+        const u64 fault = reinterpret_cast<u64>(info->si_addr);
+        std::scoped_lock diag_lock{diag_mutex};
+        auto& stat = pages[fault & ~u64{0xfff}];
+        ++stat.count;
+        stat.min_offset = (std::min)(stat.min_offset, fault & 0xfff);
+        stat.max_offset = (std::max)(stat.max_offset, fault & 0xfff);
+        if (stat.offsets.size() < 64 || stat.offsets.contains(fault & 0xfff)) {
+            ++stat.offsets[fault & 0xfff];
+        }
+        if ((++events & 0x7ff) == 0) {
+            std::vector<std::pair<u64, const PageStat*>> sorted;
+            for (const auto& [page, page_stat] : pages) {
+                sorted.emplace_back(page, &page_stat);
+            }
+            std::sort(sorted.begin(), sorted.end(),
+                      [](const auto& a, const auto& b) { return a.second->count > b.second->count; });
+            std::string text;
+            for (size_t i = 0; i < sorted.size() && i < 4; ++i) {
+                const auto& [page, page_stat] = sorted[i];
+                std::vector<std::pair<u64, u64>> offs(page_stat->offsets.begin(), page_stat->offsets.end());
+                std::sort(offs.begin(), offs.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+                text += fmt::format(" | va {:#x}: {}x, offsets {:#x}..{:#x}, top", page, page_stat->count,
+                                    page_stat->min_offset, page_stat->max_offset);
+                for (size_t j = 0; j < offs.size() && j < 6; ++j) {
+                    text += fmt::format(" {:#x}:{}", offs[j].first, offs[j].second);
+                }
+            }
+            LOG_INFO(Core_ARM, "Diag fault offsets ({} events, {} pages):{}", events, pages.size(), text);
         }
     }
 
