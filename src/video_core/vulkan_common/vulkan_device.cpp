@@ -845,7 +845,13 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
             // after ten minutes, with 32 MiB ones ~0.5 GB: a block drains only once all of its
             // images are gone, and fewer per block drain sooner. VMA gives allocations over half a
             // block (8 MiB) their own memory, which goes back to the driver when they are freed.
-            .preferredLargeHeapBlockSize = 16u * 1024u * 1024u,
+            // EDEN_NX2_VMA_BLOCK_MIB: larger blocks suballocate larger images (freeing those
+            // then skips vkFreeMemory, ~1.9 ms each on GB10) at the cost of emptier blocks.
+            .preferredLargeHeapBlockSize = [] {
+                const char* value = std::getenv("EDEN_NX2_VMA_BLOCK_MIB");
+                const u64 mib = value != nullptr ? std::strtoull(value, nullptr, 10) : 16;
+                return VkDeviceSize{(std::clamp<u64>)(mib, 16, 1024) << 20};
+            }(),
             .pAllocationCallbacks = nullptr,
             .pDeviceMemoryCallbacks = nullptr,
             .pHeapSizeLimit = heap_size_limit != 0 ? heap_size_limits.data() : nullptr,
