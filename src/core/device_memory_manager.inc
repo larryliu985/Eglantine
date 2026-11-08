@@ -712,6 +712,7 @@ void DeviceMemoryManager<Traits>::UpdatePagesCachedBatch(std::span<const std::pa
     if (ranges.empty()) {
         return;
     }
+    VideoCommon::DiagTimers::Scope diag_batch{VideoCommon::DiagTimers::Id::CachedCountBatch};
     // Runs already sorted with gaps between them (the buffer tracker's) are what the sort and
     // merge below would produce: use them as they are instead of two heap copies.
     const bool separated =
