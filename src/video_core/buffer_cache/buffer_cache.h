@@ -120,11 +120,15 @@ void BufferCache<P>::NoteGuestWriteFault(DAddr device_addr, u64 size) {
     const DAddr page_begin = Common::AlignDown(device_addr, DEVICE_PAGESIZE);
     const DAddr page_end = Common::AlignUp(device_addr + size, DEVICE_PAGESIZE);
     for (DAddr page = page_begin; page < page_end; page += DEVICE_PAGESIZE) {
+        // Hot after faulting in `threshold` consecutive frames (the game rewrites its uniform and
+        // vertex pages once a frame, each page faulting once).
         HotCandidate& candidate = hot_candidates[page];
-        if (candidate.frame != frame_tick) {
-            candidate = {frame_tick, 0};
+        if (candidate.frame == frame_tick && candidate.faults != 0) {
+            continue;
         }
-        if (++candidate.faults < threshold) {
+        candidate.faults = candidate.frame + 1 == frame_tick ? candidate.faults + 1 : 1;
+        candidate.frame = frame_tick;
+        if (candidate.faults < threshold) {
             continue;
         }
         if (!gpu_modified_ranges.Intersects(page, DEVICE_PAGESIZE)) {

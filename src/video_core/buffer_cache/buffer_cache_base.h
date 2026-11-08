@@ -260,7 +260,7 @@ public:
     void CachedWriteMemory(DAddr device_addr, u64 size);
 
     /// A guest write fault on buffer-tracked pages (TryCacheInvalidation): pages faulting
-    /// EDEN_NX2_HOT_PAGES times in a frame become hot (WordManager::hot_words).
+    /// in EDEN_NX2_HOT_PAGES consecutive frames become hot (WordManager::hot_words).
     void NoteGuestWriteFault(DAddr device_addr, u64 size);
 
     /// Cancels pending downloads over the range, so a fence can't write them over newer bytes.
