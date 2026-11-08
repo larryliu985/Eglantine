@@ -496,7 +496,12 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         TraceRenderState(is_indexed, "mesh-skipped", nullptr);
         return;
     }
-    std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
+    std::unique_lock draw_buffer_lock{buffer_cache.mutex, std::defer_lock};
+    std::unique_lock draw_texture_lock{texture_cache.mutex, std::defer_lock};
+    {
+        VideoCommon::DiagTimers::Scope diag_lock{VideoCommon::DiagTimers::Id::DrawLockWait};
+        std::lock(draw_buffer_lock, draw_texture_lock);
+    }
     // update engine as channel may be different.
     pipeline->SetEngine(maxwell3d, gpu_memory);
     const u32 repack_dirty = buffer_cache_runtime.SetVertexRepackLayout(
@@ -1623,7 +1628,12 @@ void RasterizerVulkan::DispatchCompute() {
         }
         return;
     }
-    std::scoped_lock lock{texture_cache.mutex, buffer_cache.mutex};
+    std::unique_lock dispatch_texture_lock{texture_cache.mutex, std::defer_lock};
+    std::unique_lock dispatch_buffer_lock{buffer_cache.mutex, std::defer_lock};
+    {
+        VideoCommon::DiagTimers::Scope diag_lock{VideoCommon::DiagTimers::Id::DispatchLockWait};
+        std::lock(dispatch_texture_lock, dispatch_buffer_lock);
+    }
     std::optional<ByteAddressedShadow> byte_addressed_shadow;
     buffer_cache.Nx2CollectListCopies(true);
     SCOPE_EXIT {

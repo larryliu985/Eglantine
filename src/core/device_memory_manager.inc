@@ -16,6 +16,7 @@
 #include "common/address_space.h"
 #include "common/address_space.inc"
 #include "common/alignment.h"
+#include "video_core/diag_timers.h"
 #include "common/assert.h"
 #include "common/div_ceil.h"
 #include "common/paged_scalar.h"
@@ -701,6 +702,7 @@ void DeviceMemoryManager<Traits>::UpdatePagesCachedCountNoLock(DAddr addr, size_
 
 template <typename Traits>
 void DeviceMemoryManager<Traits>::UpdatePagesCachedCount(DAddr addr, size_t size, s32 delta) {
+    VideoCommon::DiagTimers::Scope diag_count{VideoCommon::DiagTimers::Id::CachedCountUpdate};
     Common::ScopedRangeLock lk(counter_guard, addr, size);
     UpdatePagesCachedCountNoLock(addr, size, delta);
 }
