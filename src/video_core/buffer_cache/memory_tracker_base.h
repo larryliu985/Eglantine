@@ -112,6 +112,15 @@ public:
         });
     }
 
+    /// Makes the CPU-modified, writable pages of a range without GPU data hot (WordManager::MarkHot).
+    u64 MarkHot(VAddr dirty_cpu_addr, u64 query_size) noexcept {
+        u64 added = 0;
+        IteratePages<false>(dirty_cpu_addr, query_size, [&added](Manager* manager, u64 offset, size_t size) {
+            added += manager->MarkHot(manager->cpu_addr + offset, size);
+        });
+        return added;
+    }
+
     /// Mark region as modified from the CPU
     /// but don't mark it as modified until FlusHCachedWrites is called.
     void CachedCpuWrite(VAddr dirty_cpu_addr, u64 query_size) {

@@ -108,10 +108,46 @@ void BufferCache<P>::RunGarbageCollector(bool aggressive_gc) {
 }
 
 template <class P>
+void BufferCache<P>::NoteGuestWriteFault(DAddr device_addr, u64 size) {
+    static const u32 threshold = [] {
+        const char* value = std::getenv("EDEN_NX2_HOT_PAGES");
+        return value != nullptr ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 0U;
+    }();
+    if (threshold == 0 || size == 0) {
+        return;
+    }
+    ++hot_faults_seen;
+    const DAddr page_begin = Common::AlignDown(device_addr, DEVICE_PAGESIZE);
+    const DAddr page_end = Common::AlignUp(device_addr + size, DEVICE_PAGESIZE);
+    for (DAddr page = page_begin; page < page_end; page += DEVICE_PAGESIZE) {
+        HotCandidate& candidate = hot_candidates[page];
+        if (candidate.frame != frame_tick) {
+            candidate = {frame_tick, 0};
+        }
+        if (++candidate.faults < threshold) {
+            continue;
+        }
+        if (!gpu_modified_ranges.Intersects(page, DEVICE_PAGESIZE)) {
+            hot_pages_added += memory_tracker.MarkHot(page, DEVICE_PAGESIZE);
+        }
+        hot_candidates.erase(page);
+    }
+}
+
+template <class P>
 void BufferCache<P>::TickFrame() {
     // Homebrew console apps don't create or bind any channels, so this will be nullptr.
     if (!channel_state) {
         return;
+    }
+    if (frame_tick % 600 == 0 && (hot_pages_added != 0 || hot_faults_seen != 0)) {
+        LOG_INFO(HW_GPU, "Hot pages: {} became hot, {} guest write faults in 600 frames",
+                 hot_pages_added, hot_faults_seen);
+        hot_pages_added = 0;
+        hot_faults_seen = 0;
+    }
+    if (hot_candidates.size() > 65536) {
+        hot_candidates.clear();
     }
     runtime.TickFrame(slot_buffers);
     if (frame_tick % 600 == 0 && !uploaded_buffer_ranges.empty()) {

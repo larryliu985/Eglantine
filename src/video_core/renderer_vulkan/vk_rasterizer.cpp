@@ -2126,6 +2126,7 @@ bool RasterizerVulkan::TryCacheInvalidation(DAddr addr, u64 size) {
         }
         VideoCommon::DiagTimers::Scope diag_write{VideoCommon::DiagTimers::Id::InvalWriteMemory};
         buffer_cache.WriteMemory(addr, size);
+        buffer_cache.NoteGuestWriteFault(addr, size);
     }
     if (!use_filter || pipeline_cache.page_filter.Any(addr, size)) {
         pipeline_cache.InvalidateRegion(addr, size);
