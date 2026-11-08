@@ -518,6 +518,7 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
         std::copy(view_formats.begin(), view_formats.end(), key.view_formats.begin());
         *pool_key = key;
         if (vk::Image image = pool->TakePooledImage(key)) {
+            pool_key->reused = true;
             return image;
         }
     }
@@ -3055,6 +3056,53 @@ Image::Image(TextureCacheRuntime& runtime_, const ImageInfo& info_, GPUVAddr gpu
         original_image.SetObjectNameEXT(VideoCommon::Name(*this).c_str());
     }
     current_image = &Image::original_image;
+    // EDEN_NX2_IMAGE_POOL_CLEAR=1: a color image from the pool starts zeroed, like the fresh
+    // memory a new image gets, rather than with the last image's pixels: a pass that reads a
+    // target before writing all of it then sees zeros, as without the pool.
+    static const bool pool_clear = [] {
+        const char* env = std::getenv("EDEN_NX2_IMAGE_POOL_CLEAR");
+        return env != nullptr && env[0] == '1';
+    }();
+    if (pool_key.reused && pool_clear && aspect_mask == VK_IMAGE_ASPECT_COLOR_BIT &&
+        !VideoCore::Surface::IsPixelFormatASTC(info.format) &&
+        !VideoCore::Surface::IsPixelFormatBCn(info.format)) {
+        const VkImage handle = *original_image;
+        scheduler->RequestOutsideRenderPassOperationContext();
+        scheduler->Record([handle](vk::CommandBuffer cmdbuf) {
+            const VkImageSubresourceRange range{
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = VK_REMAINING_MIP_LEVELS,
+                .baseArrayLayer = 0,
+                .layerCount = VK_REMAINING_ARRAY_LAYERS,
+            };
+            const VkImageMemoryBarrier to_transfer{
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                .pNext = nullptr,
+                .srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+                .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = handle,
+                .subresourceRange = range,
+            };
+            cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                   VK_PIPELINE_STAGE_TRANSFER_BIT, 0, to_transfer);
+            cmdbuf.ClearColorImage(handle, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                   VkClearColorValue{}, range);
+            VkImageMemoryBarrier to_general = to_transfer;
+            to_general.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            to_general.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+            to_general.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            to_general.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+            cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                   VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, to_general);
+        });
+        // Later transitions keep the zeros (GENERAL, not UNDEFINED).
+        initialized = true;
+    }
     const s32 host_levels = info.resources.levels - static_cast<s32>(host_level_offset);
     storage_image_views.resize(host_levels);
     if (WillUseAcceleratedAstcDecode(runtime->device, info)) {

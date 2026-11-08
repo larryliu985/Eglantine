@@ -96,8 +96,14 @@ struct ImagePoolKey {
     u32 num_view_formats{};
     std::array<VkFormat, 8> view_formats{};
     bool valid{};
+    bool reused{}; ///< set by MakeImage when the image came from the pool (not part of the key)
 
-    bool operator==(const ImagePoolKey&) const = default;
+    bool operator==(const ImagePoolKey& rhs) const noexcept {
+        return flags == rhs.flags && format == rhs.format && width == rhs.width &&
+               height == rhs.height && samples == rhs.samples && usage == rhs.usage &&
+               num_view_formats == rhs.num_view_formats && view_formats == rhs.view_formats &&
+               valid == rhs.valid;
+    }
 };
 
 class TextureCacheRuntime {
