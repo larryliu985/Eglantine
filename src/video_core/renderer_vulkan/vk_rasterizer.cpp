@@ -2084,12 +2084,26 @@ void RasterizerVulkan::OnCacheInvalidation(DAddr addr, u64 size) {
 
 bool RasterizerVulkan::TryCacheInvalidation(DAddr addr, u64 size) {
     if (addr == 0 || size == 0) return true;
+    // Most guest writes that fault here land on pages no image was ever registered on (uniform
+    // and vertex data): those leave the texture cache, and its lock, which the GPU thread holds
+    // through each draw, alone. The page filter only gains pages, and an image registered on the
+    // page meanwhile protects it again, so the store faults once more and comes back through here.
+    // EDEN_NX2_INVAL_FILTER=0 takes both locks for every write, as before.
+    static const bool use_filter = [] {
+        const char* value = std::getenv("EDEN_NX2_INVAL_FILTER");
+        return value == nullptr || value[0] != '0';
+    }();
+    const bool textures = !use_filter || texture_cache.page_filter.Any(addr, size);
     {
         std::unique_lock buffer_lock{buffer_cache.mutex, std::defer_lock};
         std::unique_lock texture_lock{texture_cache.mutex, std::defer_lock};
         {
             VideoCommon::DiagTimers::Scope lock_scope{VideoCommon::DiagTimers::Id::TryInvalLock};
-            std::lock(buffer_lock, texture_lock);
+            if (textures) {
+                std::lock(buffer_lock, texture_lock);
+            } else {
+                buffer_lock.lock();
+            }
         }
         VideoCommon::DiagTimers::Scope held_scope{VideoCommon::DiagTimers::Id::TryInvalHeld};
         // WriteMemory downloads GPU-written bytes elsewhere on the written pages, which only the
@@ -2097,10 +2111,14 @@ bool RasterizerVulkan::TryCacheInvalidation(DAddr addr, u64 size) {
         const DAddr page_begin = Common::AlignDown(addr, Core::DEVICE_PAGESIZE);
         const DAddr page_end = Common::AlignUp(addr + size, Core::DEVICE_PAGESIZE);
         if (buffer_cache.IsRegionGpuModified(page_begin, page_end - page_begin)) return false;
-        texture_cache.WriteMemory(addr, size);
+        if (textures) {
+            texture_cache.WriteMemory(addr, size);
+        }
         buffer_cache.WriteMemory(addr, size);
     }
-    pipeline_cache.InvalidateRegion(addr, size);
+    if (!use_filter || pipeline_cache.page_filter.Any(addr, size)) {
+        pipeline_cache.InvalidateRegion(addr, size);
+    }
     return true;
 }
 
