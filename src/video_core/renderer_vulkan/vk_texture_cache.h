@@ -6,8 +6,10 @@
 
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <deque>
+#include <mutex>
 #include <memory>
 #include <optional>
 #include <span>
@@ -82,6 +84,22 @@ struct ByteAddressedRange {
     return VkExtent2D{width / 2, height};
 }
 
+/// Final host creation parameters of a pooled image: only images created from equal keys share
+/// pooled storage (see TextureCacheRuntime::TakePooledImage).
+struct ImagePoolKey {
+    VkImageCreateFlags flags{};
+    VkFormat format{};
+    u32 width{};
+    u32 height{};
+    VkSampleCountFlagBits samples{};
+    VkImageUsageFlags usage{};
+    u32 num_view_formats{};
+    std::array<VkFormat, 8> view_formats{};
+    bool valid{};
+
+    bool operator==(const ImagePoolKey&) const = default;
+};
+
 class TextureCacheRuntime {
 public:
     explicit TextureCacheRuntime(const Device& device_, Scheduler& scheduler_,
@@ -123,6 +141,19 @@ public:
     u32 MemoryPressureEvents() const noexcept {
         return memory_allocator.MemoryPressureEvents();
     }
+
+    /// Retired image pool (EDEN_NX2_IMAGE_POOL_MIB, 0 = off). Title 2 (indoors) renders its
+    /// post-processing chain into transient render targets at changing GPU addresses: the cache
+    /// creates ~150 images/s and destroys as many, ~0.8 ms and ~1.7 ms each. The pool keeps the
+    /// VkImage (with its memory) of a destroyed plain 2D image for the next image of the same
+    /// host shape; the new image starts uninitialized as if freshly created.
+    [[nodiscard]] bool ImagePoolEnabled() const noexcept;
+
+    /// A pooled image created from `key` the GPU is done with, or a null image.
+    [[nodiscard]] vk::Image TakePooledImage(const ImagePoolKey& key);
+
+    /// Pools `image` (created from `key`); leaves it with the caller when it doesn't fit.
+    void ReturnPooledImage(const ImagePoolKey& key, vk::Image& image);
 
     void LogMemoryStatistics() const;
 
@@ -338,6 +369,24 @@ public:
 
     std::vector<MsaaScratchImage> msaa_scratch_images;
     ::Common::unordered_map<VkImage, ResolveShadow> resolve_shadows;
+
+    struct PooledImage {
+        ImagePoolKey key;
+        vk::Image image;
+        u64 bytes;
+        u64 tick;  ///< GPU tick when pooled: reused once the GPU is past it
+        u64 frame; ///< pool frame when pooled, for the age limit
+    };
+    std::mutex image_pool_mutex;
+    std::deque<PooledImage> image_pool; ///< oldest first
+    /// Evicted pool images the GPU may still use (pooled from a path that didn't wait for it).
+    std::deque<std::pair<u64, vk::Image>> image_pool_doomed;
+    std::atomic<u64> image_pool_bytes{};
+    u64 image_pool_frame{};
+    u64 image_pool_hits{};
+    u64 image_pool_misses{};
+    u64 image_pool_puts{};
+    u64 image_pool_evictions{};
     std::vector<std::pair<u64, ResolveShadow>> pending_resolve_shadows;
 
     struct PendingByteAddressedShadow {
@@ -666,6 +715,9 @@ private:
     /// Records a clear of the whole image to zero.
     void ClearTiles();
 
+    /// Set by MakeImage when original_image may go to the runtime's image pool (declared first:
+    /// the original_image initializer fills it in).
+    ImagePoolKey pool_key{};
     vk::Image original_image;
     vk::Image scaled_image;
 
