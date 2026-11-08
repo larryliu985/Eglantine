@@ -20,13 +20,16 @@ enum class Id : unsigned {
     SyncComposite, SyncCpuRead, SyncForceRead, SyncInvalidate, SyncOther,
     SyncPointGuest, SyncPointFence, GpuCacheInvalidate, GpuCacheRanges, SyncpointLock,
     SyncpointActions, SyncpointNotify, SlotSignal, SlotLock, TickPipeline, TickTexture,
-    TickBuffer, TickStaging, TickFence, TickDescriptors, Count,
+    TickBuffer, TickStaging, TickFence, TickDescriptors, TcCollect, TcUnregister, TcDelete,
+    TcSentenced, TcCreate, TcScratch, TcBudget, TcUsage, TcTail, TickTextureLock, TryInvalLock, TryInvalHeld, Count,
 };
 inline constexpr std::array<const char*, static_cast<size_t>(Id::Count)> names{
     "sync composite", "sync cpu read", "sync force read", "sync invalidate", "sync other",
     "syncpoint guest", "syncpoint fence", "gpu cache invalidate", "(ranges)", "syncpoint lock wait",
     "syncpoint actions", "syncpoint notify", "slot event signal", "slot shared lock", "tick pipeline cache", "tick texture cache",
-    "tick buffer cache", "tick staging", "tick fence", "tick descriptors"};
+    "tick buffer cache", "tick staging", "tick fence", "tick descriptors", "tc collect (gc)", "tc unregister",
+    "tc delete", "tc sentenced tick", "tc create (insert)", "tc scratch release", "tc budget",
+    "tc usage query", "tc tail", "tick texture lock wait", "try-inval lock wait (guest)", "try-inval locks held (guest)"};
 
 inline bool Enabled() {
     static const bool enabled = std::getenv("EDEN_DIAG_SYNC") != nullptr;

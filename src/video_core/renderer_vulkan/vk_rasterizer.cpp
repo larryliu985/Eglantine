@@ -2085,7 +2085,13 @@ void RasterizerVulkan::OnCacheInvalidation(DAddr addr, u64 size) {
 bool RasterizerVulkan::TryCacheInvalidation(DAddr addr, u64 size) {
     if (addr == 0 || size == 0) return true;
     {
-        std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
+        std::unique_lock buffer_lock{buffer_cache.mutex, std::defer_lock};
+        std::unique_lock texture_lock{texture_cache.mutex, std::defer_lock};
+        {
+            VideoCommon::DiagTimers::Scope lock_scope{VideoCommon::DiagTimers::Id::TryInvalLock};
+            std::lock(buffer_lock, texture_lock);
+        }
+        VideoCommon::DiagTimers::Scope held_scope{VideoCommon::DiagTimers::Id::TryInvalHeld};
         // WriteMemory downloads GPU-written bytes elsewhere on the written pages, which only the
         // GPU thread may do: leave those pages to the fallback.
         const DAddr page_begin = Common::AlignDown(addr, Core::DEVICE_PAGESIZE);
@@ -2810,7 +2816,11 @@ void RasterizerVulkan::TickFrame() {
     }
     {
         Diag::Scope scope{Diag::Id::TickTexture};
-        std::scoped_lock lock{texture_cache.mutex};
+        std::unique_lock lock{texture_cache.mutex, std::defer_lock};
+        {
+            Diag::Scope lock_scope{Diag::Id::TickTextureLock};
+            lock.lock();
+        }
         texture_cache.TickFrame();
     }
     {
