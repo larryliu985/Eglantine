@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <thread>
 
 #if defined(_M_X64) || defined(_M_IX86) || defined(__x86_64__) || defined(__i386__)
@@ -61,8 +62,17 @@ public:
     }
 
 private:
-    // About 10 microseconds of spinning before sleeping.
-    static constexpr int SpinCount = 1024;
+    // About 10 microseconds of spinning before sleeping on x86 (_mm_pause). On aarch64 "yield"
+    // takes nearly no time, so the same count spins ~1 us: EDEN_NX2_SPIN_SCALE=<n> multiplies it
+    // (read once; default 1).
+    static int SpinCount() {
+        static const int count = [] {
+            const char* value = std::getenv("EDEN_NX2_SPIN_SCALE");
+            const long scale = value != nullptr ? std::strtol(value, nullptr, 10) : 1;
+            return static_cast<int>(1024 * (scale > 0 ? scale : 1));
+        }();
+        return count;
+    }
 
     static void Pause() {
 #if defined(_M_X64) || defined(_M_IX86) || defined(__x86_64__) || defined(__i386__)
@@ -73,7 +83,7 @@ private:
     }
 
     void LockContended() {
-        for (int spin = 0; spin < SpinCount; ++spin) {
+        for (int spin = 0; spin < SpinCount(); ++spin) {
             Pause();
             if (state.load(std::memory_order_relaxed) == 0) {
                 std::uint32_t expected = 0;

@@ -1061,6 +1061,17 @@ void TraceWindowTarget(const Tegra::Engines::Maxwell3D& maxwell3d, Tegra::Memory
 } // Anonymous namespace
 
 void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
+    // EDEN_NX2_DRAW_DELAY_NS=<n> (read once): a busy wait of n ns at the start of every draw, to
+    // check that frame time grows with the back thread's per-draw work (critical path test).
+    static const s64 draw_delay_ns = [] {
+        const char* value = std::getenv("EDEN_NX2_DRAW_DELAY_NS");
+        return value != nullptr ? std::strtoll(value, nullptr, 10) : 0LL;
+    }();
+    if (draw_delay_ns > 0) [[unlikely]] {
+        const auto until = std::chrono::steady_clock::now() + std::chrono::nanoseconds{draw_delay_ns};
+        while (std::chrono::steady_clock::now() < until) {
+        }
+    }
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
     // A vertex count GPU work wrote (nx2_indirect_grid.h): drawn with that count, read on the GPU.
     // Draws that need the count here (the indirect reset, quads, a first vertex) read the words,
