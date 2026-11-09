@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <algorithm>
 #include <thread>
 
@@ -168,9 +169,27 @@ PresentManager::PresentManager(const vk::Instance& instance_,
         free_queue.push_back(&frame);
     }
 
-    present_wait_enabled = use_present_thread && device.IsKhrPresentWaitSupported();
+    // The pacer learns the display's refresh only on Windows (DisplayRefreshQuery), so elsewhere
+    // it never holds frames and the present wait thread only feeds its statistics, while
+    // vkWaitForPresentKHR kept a CPU 45-65% busy on Linux (NVIDIA, DGX Spark). Off there unless
+    // EDEN_NX2_PRESENT_WAIT=1; EDEN_NX2_PRESENT_WAIT=0 turns it off on Windows too.
+    static const bool present_wait_wanted = [] {
+        const char* value = std::getenv("EDEN_NX2_PRESENT_WAIT");
+        if (value != nullptr) {
+            return value[0] != '0';
+        }
+#ifdef _WIN32
+        return true;
+#else
+        return false;
+#endif
+    }();
+    present_wait_enabled =
+        present_wait_wanted && use_present_thread && device.IsKhrPresentWaitSupported();
     LOG_INFO(Render_Vulkan, "Host pacing: present wait {}",
-             present_wait_enabled ? "supported" : "unavailable, frames are not paced");
+             present_wait_enabled ? "supported"
+             : present_wait_wanted ? "unavailable, frames are not paced"
+                                   : "off (EDEN_NX2_PRESENT_WAIT), frames are not paced");
     if (present_wait_enabled) {
         present_wait_thread =
             std::jthread([this](std::stop_token token) { PresentWaitThread(token); });
