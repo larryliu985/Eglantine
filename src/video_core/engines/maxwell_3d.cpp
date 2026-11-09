@@ -855,7 +855,8 @@ void Maxwell3D::StampQueryResult(Core::System& system, u64 payload, bool long_qu
     } else {
         memory_manager.Write<u32>(sequence_address, static_cast<u32>(payload));
     }
-    if (Common::Nx2GpuWrite::g_listener.load(std::memory_order_relaxed) != nullptr) {
+    if (Common::Nx2GpuWrite::g_listener.load(std::memory_order_relaxed) != nullptr ||
+        Common::Nx2Timeline::Guest()) {
         Common::Nx2GpuWrite::Notify(Common::Nx2GpuWrite::Path::Stamp3D,
                                     memory_manager.GpuToCpuAddress(sequence_address).value_or(0),
                                     sequence_address, memory_manager.GetPointer(sequence_address),
