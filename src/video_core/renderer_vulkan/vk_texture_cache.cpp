@@ -3178,9 +3178,13 @@ void Image::ReleaseToPool() {
             return;
         }
         // Dedicated allocations (block 0) and memory placed in host memory over budget are
-        // freed as before.
+        // freed as before, except with EXP42=2 for dedicated ones: on NVIDIA Linux (DGX Spark)
+        // freeing one scrubs it through the copy engine first (sysmemscrubScrubAndFree), 21% of
+        // the split back thread while turning the camera in Ocarina.
         const vk::Image::MemoryBlock block = image.GetMemoryBlock();
-        if (block.block == 0 || block.size < MinPooledBytes || !image.IsDeviceLocal()) {
+        const bool pool_dedicated = VideoCore::Nx2Debug::Experiment(42) >= 2;
+        if ((block.block == 0 && !pool_dedicated) || block.size < MinPooledBytes ||
+            !image.IsDeviceLocal()) {
             return;
         }
         if (ENABLE_MSAA_RESOLVE_CONSUME) {
