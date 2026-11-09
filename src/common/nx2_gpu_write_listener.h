@@ -25,7 +25,6 @@ enum class Path : u32 {
     ComputeReduce,   ///< compute report semaphore with a reduction (ProcessNativeReportSemaphore)
     QmdReduce,       ///< QMD release with a reduction
     QmdMax,          ///< QMD max release
-    InlineToMemory,  ///< an inline-to-memory upload of a few words (timeline markers only)
     Count,
 };
 
@@ -45,8 +44,6 @@ inline constexpr const char* PathName(Path path) {
         return "qmd-reduce";
     case Path::QmdMax:
         return "qmd-max";
-    case Path::InlineToMemory:
-        return "inline-to-memory";
     case Path::Count:
         break;
     }
@@ -83,8 +80,6 @@ inline constexpr const char* TimelineName(Path path) {
         return "GPU write: qmd-reduce";
     case Path::QmdMax:
         return "GPU write: qmd-max";
-    case Path::InlineToMemory:
-        return "GPU write: inline-to-memory";
     case Path::Count:
         break;
     }
