@@ -91,6 +91,72 @@ int NiceValueForPriority(Common::ThreadPriority priority) {
 } // Anonymous namespace
 #endif
 
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <cstdlib>
+#include <fstream>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace {
+// Desktop Linux on a hybrid CPU (DGX Spark's GB10: 10 Cortex-X925 + 10 Cortex-A725): the thread
+// placements as Windows' hybrid CPU sets do them. Without it the guest cores often ran on the
+// little cores and the startup pipeline prebuild on the big ones. Performance cores are those
+// within 10% of the fastest core's cpu_capacity, among the CPUs the process may use when it
+// first places a thread. EDEN_NX2_LINUX_PLACEMENT=0 turns it off.
+struct LinuxPlacement {
+    cpu_set_t allowed{};
+    cpu_set_t performance{};
+    cpu_set_t efficiency{};
+    bool hybrid = false;
+};
+
+const LinuxPlacement& Placement() {
+    static const LinuxPlacement placement = [] {
+        LinuxPlacement result;
+        const char* setting = std::getenv("EDEN_NX2_LINUX_PLACEMENT");
+        if (setting != nullptr && setting[0] == '0') {
+            LOG_INFO(Common, "Thread placement: off (EDEN_NX2_LINUX_PLACEMENT=0)");
+            return result;
+        }
+        if (sched_getaffinity(getpid(), sizeof(result.allowed), &result.allowed) != 0) {
+            return result;
+        }
+        long fastest = 0;
+        std::vector<std::pair<int, long>> capacities;
+        for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+            if (!CPU_ISSET(cpu, &result.allowed)) {
+                continue;
+            }
+            std::ifstream file("/sys/devices/system/cpu/cpu" + std::to_string(cpu) +
+                               "/cpu_capacity");
+            long capacity = 0;
+            if (!(file >> capacity) || capacity <= 0) {
+                return LinuxPlacement{};
+            }
+            capacities.emplace_back(cpu, capacity);
+            fastest = (std::max)(fastest, capacity);
+        }
+        for (const auto& [cpu, capacity] : capacities) {
+            CPU_SET(cpu, capacity * 10 >= fastest * 9 ? &result.performance : &result.efficiency);
+        }
+        result.hybrid = CPU_COUNT(&result.performance) > 0 && CPU_COUNT(&result.efficiency) > 0;
+        LOG_INFO(Common, "Thread placement: {} ({} performance, {} efficiency cores)",
+                 result.hybrid ? "hybrid" : "off, symmetric cores", CPU_COUNT(&result.performance),
+                 CPU_COUNT(&result.efficiency));
+        return result;
+    }();
+    return placement;
+}
+
+void SetCurrentThreadLinuxMask(const cpu_set_t& mask) {
+    if (sched_setaffinity(0, sizeof(mask), &mask) != 0) {
+        LOG_DEBUG(Common, "Could not set the thread's CPU affinity: {}", Common::GetLastErrorMsg());
+    }
+}
+} // Anonymous namespace
+#endif
+
 #ifdef __ANDROID__
 #include <sys/utsname.h>
 #include <atomic>
@@ -716,6 +782,10 @@ void SetCurrentThreadToPerformanceCores() {
     if (const WindowsCpuSets& sets = CpuSets(); sets.hybrid) {
         SelectCurrentThreadCpuSets(sets.performance);
     }
+#elif defined(__linux__)
+    if (const LinuxPlacement& placement = Placement(); placement.hybrid) {
+        SetCurrentThreadLinuxMask(placement.performance);
+    }
 #endif
 }
 
@@ -844,6 +914,10 @@ void SetCurrentThreadToEfficiencyCores() {
     if (const WindowsCpuSets& sets = CpuSets(); sets.hybrid) {
         SelectCurrentThreadCpuSets(sets.efficiency);
     }
+#elif defined(__linux__)
+    if (const LinuxPlacement& placement = Placement(); placement.hybrid) {
+        SetCurrentThreadLinuxMask(placement.efficiency);
+    }
 #endif
 }
 
@@ -855,6 +929,10 @@ void SetCurrentThreadToBackgroundWork() {
     if (const WindowsCpuSets& sets = CpuSets(); sets.hybrid) {
         SelectCurrentThreadCpuSets({});
     }
+#elif defined(__linux__)
+    if (const LinuxPlacement& placement = Placement(); placement.hybrid) {
+        SetCurrentThreadLinuxMask(placement.allowed);
+    }
 #endif
 }
 
@@ -865,6 +943,10 @@ void SetCurrentThreadToAllCores() {
 #elif defined(_WIN32)
     if (const WindowsCpuSets& sets = CpuSets(); sets.hybrid) {
         SelectCurrentThreadCpuSets({});
+    }
+#elif defined(__linux__)
+    if (const LinuxPlacement& placement = Placement(); placement.hybrid) {
+        SetCurrentThreadLinuxMask(placement.allowed);
     }
 #endif
 }
