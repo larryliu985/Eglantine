@@ -398,8 +398,11 @@ public:
         u64 bytes;
         u64 frame;
     };
-    static constexpr u64 ImagePoolMaxBytes = u64{512} << 20;
-    static constexpr u64 ImagePoolMaxFrames = 180;
+    /// 512 MiB and 180 frames unless EDEN_NX2_IMAGE_POOL_MIB / EDEN_NX2_IMAGE_POOL_FRAMES say
+    /// otherwise (fv8 pooled up to 2048 MiB for 600 frames). EDEN_NX2_EXP42=2 also pools plain
+    /// single-level 2D images that are not render targets.
+    static u64 ImagePoolMaxBytes();
+    static u64 ImagePoolMaxFrames();
     std::deque<PooledImage> image_pool;
     u64 image_pool_bytes{};
     u64 image_pool_frame{};
