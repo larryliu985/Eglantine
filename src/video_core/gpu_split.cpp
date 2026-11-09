@@ -1272,7 +1272,13 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
             // now on. Published positions only grow, so the front never matches a stale one.
             back_idle_at.store(read_position, std::memory_order_relaxed);
             // The front usually sends more within microseconds: spin briefly before sleeping.
-            for (u32 spins = 0; spins < 8192 && available == read_position &&
+            // EDEN_NX2_SPIN_SCALE multiplies this too (aarch64 "yield" is nearly free).
+            static const u32 idle_spins = [] {
+                const char* value = std::getenv("EDEN_NX2_SPIN_SCALE");
+                const long scale = value != nullptr ? std::strtol(value, nullptr, 10) : 1;
+                return static_cast<u32>(8192 * (scale > 0 ? scale : 1));
+            }();
+            for (u32 spins = 0; spins < idle_spins && available == read_position &&
                                 !hook_requested.load(std::memory_order_relaxed);
                  ++spins) {
                 Pause();
