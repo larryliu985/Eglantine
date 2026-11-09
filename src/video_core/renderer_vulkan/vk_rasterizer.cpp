@@ -66,6 +66,7 @@
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_query_cache.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "common/nx2_gpu_write_listener.h"
 #include "video_core/nx2_indirect_grid.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
@@ -3636,6 +3637,15 @@ void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_si
         }
     }
     AccelerateInlineToMemoryImpl(address, copy_size, memory);
+    // A guest-layer timeline: a short inline write can be what a guest polls for (NVN events).
+    if (Common::Nx2Timeline::Guest() && copy_size <= 16 && memory.size() >= sizeof(u32))
+        [[unlikely]] {
+        u32 value;
+        std::memcpy(&value, memory.data(), sizeof(value));
+        Common::Nx2GpuWrite::Notify(Common::Nx2GpuWrite::Path::InlineToMemory,
+                                    gpu_memory->GpuToCpuAddress(address).value_or(0), address,
+                                    gpu_memory->GetPointer(address), value);
+    }
 }
 
 void RasterizerVulkan::AccelerateInlineToMemoryImpl(GPUVAddr address, size_t copy_size,
