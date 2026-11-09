@@ -14,6 +14,10 @@
 
 #include <fmt/format.h>
 
+#ifdef __linux__
+#include <pthread.h>
+#endif
+
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -129,6 +133,12 @@ std::string CurrentThreadName() {
                 return name;
             }
         }
+    }
+#elif defined(__linux__)
+    // The name SetCurrentThreadName gave (critical_path.py tells the GPU threads by it).
+    char name[16]{};
+    if (pthread_getname_np(pthread_self(), name, sizeof(name)) == 0 && name[0] != 0) {
+        return name;
     }
 #endif
     return "thread";
