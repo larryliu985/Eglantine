@@ -1029,6 +1029,27 @@ u64 MarkEventObjectForTimeline(KProcess& process, const Svc::ThreadContext& ctx)
         !memory.IsValidVirtualAddressRange(object, EventObjectWords * sizeof(u64))) {
         return 0;
     }
+    // EDEN_NX2_OOT_POLL_LOG=1: log the event object's address-like words when the polled object
+    // changes (a few times), for a hardware watchpoint on the word that ends the poll.
+    static const bool log_words = [] {
+        const char* value = std::getenv("EDEN_NX2_OOT_POLL_LOG");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (log_words) [[unlikely]] {
+        static std::atomic<u64> last_logged{};
+        static std::atomic<u32> logged{};
+        if (last_logged.exchange(object, std::memory_order_relaxed) != object &&
+            logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+            std::string words;
+            for (size_t k = 0; k < EventObjectWords; ++k) {
+                const u64 field = memory.Read64(object + k * sizeof(u64));
+                if (field >= MinAddressField) {
+                    words += fmt::format(" f{}={:#x}", k, field);
+                }
+            }
+            LOG_INFO(Kernel_SVC, "OoT present poll object {:#x}:{}", object, words);
+        }
+    }
     if (!Common::Nx2Timeline::Guest()) {
         return object;
     }
