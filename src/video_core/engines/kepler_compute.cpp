@@ -555,7 +555,8 @@ void KeplerCompute::ProcessNativeReportSemaphore(u32 argument) {
                 }
             }
             memory_manager.Write<u32>(address, value);
-            if (Common::Nx2GpuWrite::g_listener.load(std::memory_order_relaxed) != nullptr) {
+            if (Common::Nx2GpuWrite::g_listener.load(std::memory_order_relaxed) != nullptr ||
+                Common::Nx2Timeline::Guest()) {
                 Common::Nx2GpuWrite::Notify(Common::Nx2GpuWrite::Path::ComputeReduce,
                                             memory_manager.GpuToCpuAddress(address).value_or(0),
                                             address, memory_manager.GetPointer(address), value);
