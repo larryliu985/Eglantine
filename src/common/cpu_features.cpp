@@ -454,4 +454,13 @@ WallClock g_wall_clock = [] {
     return WallClock(true, 1);
 #endif
 }();
+#ifndef ARCHITECTURE_x86_64
+std::optional<int> GetProcessorCount() {
+    // Elsewhere than x86-64 (the definition above sits in its CPUID block; arm64 Linux failed to
+    // link the frontend): the logical CPU count.
+    const unsigned count = std::thread::hardware_concurrency();
+    return count != 0 ? std::optional<int>{static_cast<int>(count)} : std::nullopt;
+}
+#endif
+
 } // namespace Common
