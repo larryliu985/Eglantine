@@ -47,6 +47,9 @@ ROLES = {
     "GPUFencingThread": "fence",
     "VulkanPresent": "present",
     "VulkanPresentWait": "present-wait",
+    # Linux keeps 15 characters of a thread name (pthread_setname_np).
+    "GPUFencingThrea": "fence",
+    "VulkanPresentWa": "present-wait",
 }
 
 # What time outside every span is on a thread of a stage: those loops record their waits, so
