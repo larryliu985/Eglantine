@@ -314,6 +314,20 @@ void CreateEdenPaths() {
     PathManagerImpl::GetInstance().CreateEdenPaths();
 }
 
+#ifndef _WIN32
+fs::path GetExeDirectory() {
+    // Linux: /proc/self/exe names the running executable (precompile recipes ship beside it).
+    std::error_code error;
+    const fs::path exe = fs::read_symlink("/proc/self/exe", error);
+    if (error) {
+        LOG_ERROR(Common_Filesystem, "Failed to get the path to the executable: {}",
+                  error.message());
+        return fs::current_path(error);
+    }
+    return exe.parent_path();
+}
+#endif
+
 #ifdef _WIN32
 
 fs::path GetExeDirectory() {
