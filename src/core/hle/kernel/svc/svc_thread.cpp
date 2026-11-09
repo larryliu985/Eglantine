@@ -195,8 +195,14 @@ void SleepThread(Core::System& system, s64 ns) {
         // guest thread resumes on. The span carries the poll's event object (its words are
         // marked with the guest layer, for the GPU write that sets it).
         u64 poll_object = 0;
-        const bool poll_span = Common::Nx2Timeline::Active() &&
-                               IsNx2OotPresentPollSleep(system, ns, &poll_object);
+        // EDEN_NX2_OOT_POLL_LOG=1 looks at the poll outside recordings too (it logs the object).
+        static const bool poll_log = [] {
+            const char* value = std::getenv("EDEN_NX2_OOT_POLL_LOG");
+            return value != nullptr && value[0] == '1';
+        }();
+        const bool poll_span = (Common::Nx2Timeline::Active() || poll_log) &&
+                               IsNx2OotPresentPollSleep(system, ns, &poll_object) &&
+                               Common::Nx2Timeline::Active();
         const u64 poll_begin = poll_span ? Common::Nx2Timeline::Now() : 0;
         SCOPE_EXIT {
             if (poll_span) {
