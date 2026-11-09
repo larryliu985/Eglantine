@@ -541,7 +541,8 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     if (pool_key != nullptr && !unbacked && image_ci.imageType == VK_IMAGE_TYPE_2D &&
         image_ci.mipLevels == 1 && image_ci.arrayLayers == 1 &&
-        image_ci.samples == VK_SAMPLE_COUNT_1_BIT && (image_ci.usage & attachment_usage) != 0) {
+        image_ci.samples == VK_SAMPLE_COUNT_1_BIT &&
+        ((image_ci.usage & attachment_usage) != 0 || VideoCore::Nx2Debug::Experiment(42) >= 2)) {
         *pool_key = ImagePoolKey{
             .valid = true,
             .flags = image_ci.flags,
@@ -2956,8 +2957,29 @@ vk::Image TextureCacheRuntime::TakePooledImage(const ImagePoolKey& key) {
     return vk::Image{};
 }
 
+u64 TextureCacheRuntime::ImagePoolMaxBytes() {
+    // EDEN_NX2_IMAGE_POOL_MIB, else 512 MiB, or 1.5 GiB with EXP42=2, which pools the big
+    // dedicated render targets too (512 MiB held ~17 of them in Castle Town, 2026-11-10).
+    static const u64 env_bytes = [] {
+        const char* value = std::getenv("EDEN_NX2_IMAGE_POOL_MIB");
+        return value != nullptr ? std::strtoull(value, nullptr, 10) << 20 : u64{0};
+    }();
+    if (env_bytes != 0) {
+        return env_bytes;
+    }
+    return VideoCore::Nx2Debug::Experiment(42) >= 2 ? u64{1536} << 20 : u64{512} << 20;
+}
+
+u64 TextureCacheRuntime::ImagePoolMaxFrames() {
+    static const u64 frames = [] {
+        const char* value = std::getenv("EDEN_NX2_IMAGE_POOL_FRAMES");
+        return value != nullptr ? std::strtoull(value, nullptr, 10) : u64{180};
+    }();
+    return frames;
+}
+
 void TextureCacheRuntime::PoolImage(const ImagePoolKey& key, vk::Image image, u64 bytes) {
-    if (!key.valid || !image || bytes > ImagePoolMaxBytes) {
+    if (!key.valid || !image || bytes > ImagePoolMaxBytes()) {
         return;
     }
     image_pool.push_back(PooledImage{
@@ -2968,11 +2990,7 @@ void TextureCacheRuntime::PoolImage(const ImagePoolKey& key, vk::Image image, u6
     });
     image_pool_bytes += bytes;
     ++image_pool_given;
-    TrimImagePool(ImagePoolCap());
-}
-
-u64 TextureCacheRuntime::ImagePoolCap() {
-    return VideoCore::Nx2Debug::Experiment(42) >= 2 ? ImagePoolMaxBytesDedicated : ImagePoolMaxBytes;
+    TrimImagePool(ImagePoolMaxBytes());
 }
 
 void TextureCacheRuntime::TrimImagePool(u64 max_bytes) {
@@ -2999,7 +3017,7 @@ void TextureCacheRuntime::TickFrame() {
             TrimImagePool(0);
         }
         while (!image_pool.empty() &&
-               image_pool_frame - image_pool.front().frame > ImagePoolMaxFrames) {
+               image_pool_frame - image_pool.front().frame > ImagePoolMaxFrames()) {
             image_pool_bytes -= image_pool.front().bytes;
             image_pool.pop_front();
             ++image_pool_evicted;
