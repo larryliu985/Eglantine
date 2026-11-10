@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 #include <array>
 #include <bit>
 #include <limits>
@@ -223,6 +224,52 @@ vk::Image MemoryAllocator::TryCreateImage(const VkImageCreateInfo &ci, bool dedi
     return image;
 }
 
+// EDEN_NX2_IMAGE_SUBALLOC_MIB=N: an image whose memory needs are at most N MiB takes it from VMA's
+// blocks with its plain requirements, as vmaAllocateMemory + vmaBindImageMemory, instead of
+// vmaCreateImage, which follows the driver's preference for a dedicated allocation. NVIDIA prefers
+// one for most images, and frees each with a scrub of its memory (a copy-engine clear and a CPU
+// write-combine flush) on the thread that drops the image; memory from a block goes back to the
+// block instead. Off (0) by default. Sizes over half a block still get their own memory from VMA,
+// so N above EDEN_NX2_VMA_BLOCK_MIB / 2 has no further effect.
+bool MemoryAllocator::SubAllocateImage(const VkImageCreateInfo &ci,
+                                       const VmaAllocationCreateInfo &alloc_ci, VkImage &handle,
+                                       VmaAllocation &allocation,
+                                       VmaAllocationInfo &alloc_info) const {
+    static const u64 max_bytes = [] {
+        const char *env = std::getenv("EDEN_NX2_IMAGE_SUBALLOC_MIB");
+        return env ? u64{std::strtoull(env, nullptr, 10)} << 20 : u64{0};
+    }();
+    if (max_bytes == 0) {
+        return false;
+    }
+    const auto &dld = device.GetDispatchLoader();
+    const VkDevice dev = *device.GetLogical();
+    VkImage image{};
+    if (dld.vkCreateImage(dev, &ci, nullptr, &image) != VK_SUCCESS) {
+        return false;
+    }
+    VkMemoryRequirements reqs{};
+    dld.vkGetImageMemoryRequirements(dev, image, &reqs);
+    // vmaAllocateMemory takes no VMA_MEMORY_USAGE_AUTO*: ask for device-local memory directly.
+    VmaAllocationCreateInfo plain = alloc_ci;
+    plain.usage = VMA_MEMORY_USAGE_UNKNOWN;
+    plain.preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    VmaAllocation mem{};
+    if (reqs.size > max_bytes ||
+        vmaAllocateMemory(allocator, &reqs, &plain, &mem, &alloc_info) != VK_SUCCESS) {
+        dld.vkDestroyImage(dev, image, nullptr);
+        return false;
+    }
+    if (vmaBindImageMemory(allocator, mem, image) != VK_SUCCESS) {
+        vmaFreeMemory(allocator, mem);
+        dld.vkDestroyImage(dev, image, nullptr);
+        return false;
+    }
+    handle = image;
+    allocation = mem;
+    return true;
+}
+
 VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedicated, bool may_fail,
                                         vk::Image &image) const {
     const VmaAllocationCreateInfo alloc_ci = {
@@ -246,8 +293,12 @@ VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedica
     VmaAllocationInfo alloc_info{};
     const u64 texels = u64{ci.extent.width} * ci.extent.height * ci.extent.depth * ci.arrayLayers;
     const bool huge = texels > MaxBackedImageTexels;
-    VkResult result = huge ? VK_ERROR_OUT_OF_DEVICE_MEMORY
-                           : vmaCreateImage(allocator, &ci, &alloc_ci, &handle, &allocation, &alloc_info);
+    VkResult result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    if (!huge) {
+        result = !dedicated && SubAllocateImage(ci, alloc_ci, handle, allocation, alloc_info)
+                     ? VK_SUCCESS
+                     : vmaCreateImage(allocator, &ci, &alloc_ci, &handle, &allocation, &alloc_info);
+    }
     if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !huge) {
         // Over the device memory budget (Switch 2 titles fill 8 GB cards): let the driver page
         // it out rather than failing the draw and aborting.
