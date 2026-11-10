@@ -176,6 +176,10 @@ namespace Vulkan {
         /// may_fail: the caller handles VK_ERROR_OUT_OF_DEVICE_MEMORY (see UsesUnbackedFallback).
         VkResult AllocateImage(const VkImageCreateInfo &ci, bool dedicated, bool may_fail,
                                vk::Image &image) const;
+        /// AllocateImage's block path for EDEN_NX2_IMAGE_SUBALLOC_MIB; false: not taken.
+        bool SubAllocateImage(const VkImageCreateInfo &ci, const VmaAllocationCreateInfo &alloc_ci,
+                              VkImage &handle, VmaAllocation &allocation,
+                              VmaAllocationInfo &alloc_info) const;
 
         const Device &device;                              ///< Device handle.
         VmaAllocator allocator;                           ///< VMA allocator.
