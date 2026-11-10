@@ -519,6 +519,8 @@ struct Memory::Impl {
         std::array<u64, 2> calls{};
         std::array<u64, 2> pages{};
         std::unordered_map<u64, u32> protected_pages;
+        // Cached pages per 2 MiB region (pages, by the 0 <-> 1 transitions this sees).
+        std::unordered_map<u64, s64> region_pages;
         std::chrono::steady_clock::time_point last_log{std::chrono::steady_clock::now()};
 
         static ProtectStats* Get() {
@@ -533,6 +535,10 @@ struct Memory::Impl {
             const u64 last = (vaddr + size - 1) >> YUZU_PAGEBITS;
             ++calls[cached];
             pages[cached] += last - first + 1;
+            for (u64 page = first; page <= last; ++page) {
+                auto& region = region_pages[page >> 9];
+                region += cached ? 1 : -1;
+            }
             if (cached) {
                 for (u64 page = first; page <= last; ++page) {
                     ++protected_pages[page];
@@ -547,10 +553,26 @@ struct Memory::Impl {
             for (const auto& [page, count] : protected_pages) {
                 hot += count >= 100 ? 1 : 0;
             }
+            size_t regions = 0;
+            s64 cached_pages = 0;
+            for (auto it = region_pages.begin(); it != region_pages.end();) {
+                if (it->second <= 0) {
+                    it = region_pages.erase(it);
+                    continue;
+                }
+                ++regions;
+                cached_pages += it->second;
+                ++it;
+            }
             LOG_INFO(HW_Memory,
                      "Page protection (5 s): protect {} calls {} pages ({} distinct, {} protected "
-                     "100+ times), unprotect {} calls {} pages",
-                     calls[1], pages[1], protected_pages.size(), hot, calls[0], pages[0]);
+                     "100+ times), unprotect {} calls {} pages; cached 0->1 {} pages, {} GPU-written; "
+                     "{} regions of 2 MiB hold {} cached pages; {} dispatches, {} acquire resumes",
+                     calls[1], pages[1], protected_pages.size(), hot, calls[0], pages[0],
+                     Tegra::g_nx2_stat_cache_on_pages.exchange(0),
+                     Tegra::g_nx2_stat_cache_on_gpu_pages.exchange(0), regions, cached_pages,
+                     Tegra::g_nx2_stat_dispatches.exchange(0),
+                     Tegra::g_nx2_stat_resumes.exchange(0));
             calls = {};
             pages = {};
             protected_pages.clear();
