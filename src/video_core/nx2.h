@@ -209,6 +209,13 @@ inline std::atomic<u64> g_nx2_guest_writes_collected{};
 /// mutexes stayed taken (EDEN_NX2_EXP60).
 inline std::atomic<u64> g_nx2_guest_reads_handed{};
 
+/// EDEN_NX2_MME_DMA_STATS: pages that became cached (count 0 -> 1), how many of those the GPU has
+/// written, GPFIFO dispatches and semaphore-acquire resumes; logged with Memory's protect stats.
+inline std::atomic<u64> g_nx2_stat_cache_on_pages{};
+inline std::atomic<u64> g_nx2_stat_cache_on_gpu_pages{};
+inline std::atomic<u64> g_nx2_stat_dispatches{};
+inline std::atomic<u64> g_nx2_stat_resumes{};
+
 /// Whether any page of the range may have been written by the GPU (zortos293/Lichii#463).
 [[nodiscard]] inline bool Nx2MayBeGpuWritten(u64 device_address, u64 size) {
     if (size == 0) {

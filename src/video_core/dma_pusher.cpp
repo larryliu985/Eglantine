@@ -185,6 +185,10 @@ void DmaPusher::DispatchCalls() {
             system.GPU().InvalidateGPUCache();
         }
     }
+    static const bool stats = std::getenv("EDEN_NX2_MME_DMA_STATS") != nullptr;
+    if (stats) {
+        Tegra::g_nx2_stat_dispatches.fetch_add(1, std::memory_order_relaxed);
+    }
     // The sub-index is kept: a channel suspended on a semaphore resumes inside its command list.
     dma_state.is_last_call = true;
     while (system.IsPoweredOn()) {
@@ -214,6 +218,10 @@ bool DmaPusher::Step() {
     const u64 suspensions_before = suspensions.load(std::memory_order_relaxed);
     if (!puller.ResumeAcquire(*this)) {
         return false;
+    }
+    if (suspensions.load(std::memory_order_relaxed) != suspensions_before &&
+        std::getenv("EDEN_NX2_MME_DMA_STATS") != nullptr) {
+        Tegra::g_nx2_stat_resumes.fetch_add(1, std::memory_order_relaxed);
     }
     // Lists queued while the channel waited were read from memory, not as submitted: the game
     // writes the commands a list runs before it releases the acquire, so the words at submit time
