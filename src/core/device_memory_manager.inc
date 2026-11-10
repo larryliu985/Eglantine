@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <atomic>
+#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <type_traits>
@@ -24,6 +25,7 @@
 #include "core/device_memory.h"
 #include "core/device_memory_manager.h"
 #include "core/memory.h"
+#include "video_core/nx2.h"
 #include "video_core/nx2_perf.h"
 
 namespace Core {
@@ -684,6 +686,15 @@ void DeviceMemoryManager<Traits>::UpdatePagesCachedCountNoLock(DAddr addr, size_
             uncache_bytes = 0;
         }
         if (count.load(std::memory_order::relaxed) == 1 && delta > 0) {
+            static const bool stats = std::getenv("EDEN_NX2_MME_DMA_STATS") != nullptr;
+            if (stats) [[unlikely]] {
+                Tegra::g_nx2_stat_cache_on_pages.fetch_add(1, std::memory_order_relaxed);
+                if (Tegra::Nx2MayBeGpuWritten(u64{page} << Memory::YUZU_PAGEBITS,
+                                                  Memory::YUZU_PAGESIZE)) {
+                    Tegra::g_nx2_stat_cache_on_gpu_pages.fetch_add(1,
+                                                                       std::memory_order_relaxed);
+                }
+            }
             if (cache_bytes == 0) {
                 cache_begin = vpage;
             }
