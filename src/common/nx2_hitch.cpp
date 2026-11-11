@@ -19,6 +19,10 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <psapi.h>
+#else
+#include <ctime>
+#include <pthread.h>
+#include <sys/resource.h>
 #endif
 
 namespace Common::Nx2Hitch {
@@ -33,6 +37,8 @@ struct ThreadEntry {
     char name[32]{};
 #ifdef _WIN32
     HANDLE handle{};
+#else
+    clockid_t clock{}; ///< the thread's CPU-time clock (pthread_getcpuclockid)
 #endif
 };
 
@@ -86,6 +92,26 @@ Snapshot Take() {
             snapshot.thread_kernel[i] = FileTimeValue(kernel);
         }
     }
+#else
+    // Linux: the process's times and faults from getrusage, each registered thread's CPU time
+    // from its CPU-time clock (user and kernel together, put under user). A thread that exited
+    // reads 0 and is skipped by BusiestThreads.
+    rusage usage{};
+    if (getrusage(RUSAGE_SELF, &usage) == 0) {
+        snapshot.page_faults = static_cast<u64>(usage.ru_minflt + usage.ru_majflt);
+        snapshot.user_100ns = static_cast<u64>(usage.ru_utime.tv_sec) * 10'000'000ULL +
+                              static_cast<u64>(usage.ru_utime.tv_usec) * 10ULL;
+        snapshot.kernel_100ns = static_cast<u64>(usage.ru_stime.tv_sec) * 10'000'000ULL +
+                                static_cast<u64>(usage.ru_stime.tv_usec) * 10ULL;
+    }
+    snapshot.threads = g_thread_count.load(std::memory_order_acquire);
+    for (size_t i = 0; i < snapshot.threads; ++i) {
+        timespec time{};
+        if (clock_gettime(g_threads[i].clock, &time) == 0) {
+            snapshot.thread_user[i] = (static_cast<u64>(time.tv_sec) * 1'000'000'000ULL +
+                                       static_cast<u64>(time.tv_nsec)) / 100ULL;
+        }
+    }
 #endif
     return snapshot;
 }
@@ -107,8 +133,13 @@ std::string BusiestThreads(const Snapshot& last, const Snapshot& now) {
     };
     std::vector<Busy> busy;
     for (size_t i = 0; i < now.threads; ++i) {
-        const u64 user = now.thread_user[i] - (i < last.threads ? last.thread_user[i] : 0);
-        const u64 kernel = now.thread_kernel[i] - (i < last.threads ? last.thread_kernel[i] : 0);
+        const u64 last_user = i < last.threads ? last.thread_user[i] : 0;
+        const u64 last_kernel = i < last.threads ? last.thread_kernel[i] : 0;
+        if (now.thread_user[i] < last_user || now.thread_kernel[i] < last_kernel) {
+            continue; // the thread exited (its clock reads 0 now)
+        }
+        const u64 user = now.thread_user[i] - last_user;
+        const u64 kernel = now.thread_kernel[i] - last_kernel;
         if (user + kernel == 0) {
             continue;
         }
@@ -212,7 +243,19 @@ void RegisterThread(const char* name) {
     entry.handle = handle;
     g_thread_count.store(index + 1, std::memory_order_release);
 #else
-    static_cast<void>(name);
+    std::scoped_lock lock{g_thread_mutex};
+    const size_t index = g_thread_count.load(std::memory_order_relaxed);
+    if (index >= MaxThreads) {
+        return;
+    }
+    clockid_t clock{};
+    if (pthread_getcpuclockid(pthread_self(), &clock) != 0) {
+        return;
+    }
+    ThreadEntry& entry = g_threads[index];
+    std::strncpy(entry.name, name, sizeof(entry.name) - 1);
+    entry.clock = clock;
+    g_thread_count.store(index + 1, std::memory_order_release);
 #endif
 }
 
