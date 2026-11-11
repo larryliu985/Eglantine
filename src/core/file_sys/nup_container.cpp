@@ -19,6 +19,10 @@
 #include <chrono>
 #include <cstdlib>
 #include <zstd.h>
+#ifndef ZSTD_WINDOWLOG_MAX
+// Only defined under ZSTD_STATIC_LINKING_ONLY in the system zstd.h (Linux): its 64-bit value.
+#define ZSTD_WINDOWLOG_MAX 31
+#endif
 
 #include "common/fs/path_util.h"
 #include "common/logging.h"
