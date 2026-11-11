@@ -281,7 +281,34 @@ constexpr std::array POLL_BACKOFF_RECORDS{
     BuiltinPatchRecord{.module_offset = 0x1708C, .bytes = POLL_BACKOFF_RETURN, .checked = true, .original = 0},
 };
 
+// Texture Pool x2 (port of zortos293/Lichii#1313, RsMan-Dev's patch from #247): with Max Resolution
+// the Castle Town guard house outgrows the initial pool of the game's DynamicTextureAllocator, an
+// allocation fails unchecked and the game then reads and writes unmapped memory (a freeze, or a
+// jump to 0 as on the Spark 2026-11-11). stp x8, x9, [sp, #0x10] at main+0xC2A36C stores the
+// initial pool size (x8); it becomes a call to a routine that doubles x8 first (lsl ; stp ; ret).
+// The routine sits at upstream's main+0x3C462C0, after Dark's 120 bytes (free unless a mod such as
+// the Hyrule Cheat Menu uses that space; our high refresh cave is at main+0x3C46E00).
+constexpr std::array<u8, 4> TEXTURE_POOL_CALL{0xD5, 0x6F, 0xC0, 0x94}; // bl 0x3c462c0
+constexpr std::array<u8, 12> TEXTURE_POOL_ROUTINE{
+    0x08, 0xF9, 0x7F, 0xD3, 0xE8, 0x27, 0x01, 0xA9, 0xC0, 0x03, 0x5F, 0xD6,
+};
+constexpr std::array TEXTURE_POOL_RECORDS{
+    BuiltinPatchRecord{.module_offset = 0xC2A36C,
+                       .bytes = TEXTURE_POOL_CALL,
+                       .checked = true,
+                       .original = 0xA90127E8}, // stp x8, x9, [sp, #0x10]
+    BuiltinPatchRecord{.module_offset = 0x3C462C0, .bytes = TEXTURE_POOL_ROUTINE},
+};
+
 constexpr std::array BUILTIN_PATCHES{
+    BuiltinPatch{
+        .name = "Texture Pool x2 (built-in)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = TEXTURE_POOL_RECORDS,
+        .disable_env = "EDEN_NX2_NO_TEXPOOL2",
+    },
     BuiltinPatch{
         .name = "Max Resolution (built-in)",
         .title_id = 0x0400486024DEC000,
