@@ -5,6 +5,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
+#include <chrono>
 #include <array>
 #include <cstring>
 
@@ -465,6 +467,26 @@ void NPad::RequestPadStateUpdate(Kernel::KernelCore& kernel, u64 aruid, Core::HI
             btn::Minus | btn::StickLLeft | btn::StickLUp | btn::StickLRight | btn::StickLDown;
         pad_entry.npad_buttons.raw |= button_state.raw & left_button_mask;
         pad_entry.l_stick = stick_state.left;
+        // EDEN_NX2_INPUT_TRACE=1: the left stick the guest is given, held/centre transitions.
+        static const bool input_trace = [] {
+            const char* v = std::getenv("EDEN_NX2_INPUT_TRACE");
+            return v != nullptr && v[0] == '1';
+        }();
+        if (input_trace) {
+            static int last = 0;
+            const int ax = stick_state.left.x < 0 ? -stick_state.left.x : stick_state.left.x;
+            const int ay = stick_state.left.y < 0 ? -stick_state.left.y : stick_state.left.y;
+            const int mag = ax > ay ? ax : ay;
+            const int state = mag > 9830 ? 1 : (mag < 4915 ? 0 : last);
+            if (state != last) {
+                last = state;
+                const auto wall = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      std::chrono::system_clock::now().time_since_epoch())
+                                      .count();
+                LOG_INFO(Service_HID, "INPUT_TRACE npad L ({}, {}) {} wall {}",
+                         stick_state.left.x, stick_state.left.y, state ? "held" : "centre", wall);
+            }
+        }
     }
 
     if (controller_type == Core::HID::NpadStyleIndex::JoyconLeft ||

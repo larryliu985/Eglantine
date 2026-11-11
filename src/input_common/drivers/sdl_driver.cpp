@@ -4,6 +4,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
+#include <chrono>
 #include <array>
 #include <numbers>
 #include "common/logging.h"
@@ -620,6 +622,28 @@ void SDLDriver::HandleGameControllerEvent(const SDL_Event& event) {
         if (const auto joystick = GetSDLJoystickBySDLID(event.jaxis.which)) {
             const PadIdentifier identifier = joystick->GetPadIdentifier();
             SetAxis(identifier, event.jaxis.axis, event.jaxis.value / 32767.0f);
+            // EDEN_NX2_INPUT_TRACE=1: left stick held/centre transitions as SDL hands them over,
+            // with the event's age (SDL ticks), and the wall clock to line up with evdev.
+            static const bool input_trace = [] {
+                const char* v = std::getenv("EDEN_NX2_INPUT_TRACE");
+                return v != nullptr && v[0] == '1';
+            }();
+            if (input_trace && event.jaxis.axis < 2) {
+                static std::array<int, 2> last_state{};
+                const float v = event.jaxis.value / 32767.0f;
+                const float a = v < 0 ? -v : v;
+                int& last = last_state[event.jaxis.axis];
+                const int state = a > 0.3f ? 1 : (a < 0.15f ? 0 : last);
+                if (state != last) {
+                    last = state;
+                    const auto wall = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::system_clock::now().time_since_epoch())
+                                          .count();
+                    LOG_INFO(Input, "INPUT_TRACE sdl axis {} {:+.2f} {} age {} us wall {}",
+                             event.jaxis.axis, v, state ? "held" : "centre",
+                             (SDL_GetTicksNS() - event.jaxis.timestamp) / 1000, wall);
+                }
+            }
         }
         break;
     }
