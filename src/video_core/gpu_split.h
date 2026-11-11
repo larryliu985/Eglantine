@@ -1000,8 +1000,10 @@ private:
     bool front_macros{};
     std::unique_ptr<u64[]> ring;
 
-    // Front side.
-    u64 write_position{};
+    // Front side, in its own 128-byte block: the back writes back_engine on every engine switch,
+    // and next to these fields that made the front miss the cache on almost every ring write
+    // (port of zortos293/Lichii#1332, found by SerkiGohan).
+    alignas(128) u64 write_position{};
     u64 last_writer_position{};
     u64 last_memory_writer_position{};
     u64 last_unranged_position{};
@@ -1143,8 +1145,8 @@ private:
     u32 publishes{};
     void ReportBatched();
 
-    // Back side.
-    Tegra::Engines::EngineInterface* back_engine{};
+    // Back side, in its own block.
+    alignas(128) Tegra::Engines::EngineInterface* back_engine{};
     /// The position of the entry being run (dispatch writes record it).
     u64 back_entry_position{};
     /// EXP10: the front asked the back to record dispatch writes (NoteDispatchWriter).
