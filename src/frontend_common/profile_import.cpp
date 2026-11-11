@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <string_view>
+#include "common/fs/fs_paths.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -27,6 +29,10 @@ fs::path ProfileImportStateDirectory() {
 }
 
 bool NeedsLegacyProfileImport() {
+    // DS_Claw: the data folder stays eden (fs_paths.h), so there is nothing to import from it.
+    if (std::string_view{EDEN_DIR} == EDEN_LEGACY_DIR) {
+        return false;
+    }
 #ifdef __ANDROID__
     return false;
 #else
