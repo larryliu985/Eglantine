@@ -206,6 +206,12 @@ void MultiRangeBufferCache::DrainRetired(Scheduler& scheduler) {
     }
 }
 
+void MultiRangeBufferCache::TickFrame(Scheduler& scheduler) {
+    ++frame;
+    EraseUnused(entries, frame, [&](Entry& entry) { RetireEntry(scheduler, entry); });
+    DrainRetired(scheduler);
+}
+
 MultiRangeRef MultiRangeBufferCache::Get(const Device& device, Scheduler& scheduler,
                                          MemoryAllocator& memory_allocator, u64 key,
                                          std::span<const MultiRangeSource> sources,
@@ -221,6 +227,7 @@ MultiRangeRef MultiRangeBufferCache::Get(const Device& device, Scheduler& schedu
     const auto it = entries.find(key);
     if (it != entries.end() && it->second.geometry == geometry && it->second.size == total) {
         Entry& entry = it->second;
+        entry.last_used = frame;
         if (entry.content != content) {
             entry.content = content;
             entry.dirty = true;
@@ -248,6 +255,7 @@ MultiRangeRef MultiRangeBufferCache::Get(const Device& device, Scheduler& schedu
     entry.geometry = geometry;
     entry.content = content;
     entry.size = total;
+    entry.last_used = frame;
     if (CanBindSparse(sources)) {
         entry.sparse_handle = CreateSparse(device, scheduler, sources, total);
         if (entry.sparse_handle) {
