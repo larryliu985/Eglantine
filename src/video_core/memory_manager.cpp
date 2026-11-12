@@ -763,19 +763,43 @@ void MemoryManager::FlushRegion(GPUVAddr gpu_addr, size_t size,
                           [[maybe_unused]] std::size_t offset,
                           [[maybe_unused]] std::size_t copy_amount) {};
 
+    // Each flush can stop and wait for the host GPU, so adjacent device pages go in one flush.
+    // EDEN_NX2_FLUSH_COALESCE=0 flushes each page run as the walk finds it.
+    static const bool coalesce = [] {
+        const char* value = std::getenv("EDEN_NX2_FLUSH_COALESCE");
+        return value == nullptr || value[0] != '0';
+    }();
+    DAddr run_start{};
+    std::size_t run_size{};
+    const auto add_range = [&](DAddr dev_addr, std::size_t copy_amount) {
+        if (!coalesce) {
+            rasterizer->FlushRegion(dev_addr, copy_amount, which);
+            return;
+        }
+        if (run_size != 0 && run_start + run_size == dev_addr) {
+            run_size += copy_amount;
+            return;
+        }
+        if (run_size != 0) {
+            rasterizer->FlushRegion(run_start, run_size, which);
+        }
+        run_start = dev_addr;
+        run_size = copy_amount;
+    };
     auto mapped_normal = [&](std::size_t page_index, std::size_t offset, std::size_t copy_amount) {
-        const DAddr dev_addr_base = (DAddr(page_table[page_index]) << cpu_page_bits) + offset;
-        rasterizer->FlushRegion(dev_addr_base, copy_amount, which);
+        add_range((DAddr(page_table[page_index]) << cpu_page_bits) + offset, copy_amount);
     };
     auto mapped_big = [&](std::size_t page_index, std::size_t offset, std::size_t copy_amount) {
-        const DAddr dev_addr_base = (DAddr(big_page_table_dev[page_index]) << cpu_page_bits) + offset;
-        rasterizer->FlushRegion(dev_addr_base, copy_amount, which);
+        add_range((DAddr(big_page_table_dev[page_index]) << cpu_page_bits) + offset, copy_amount);
     };
     auto flush_short_pages = [&](std::size_t page_index, std::size_t offset, std::size_t copy_amount) {
         GPUVAddr base = (page_index << big_page_bits) + offset;
         MemoryOperation(base, copy_amount, false, mapped_normal, do_nothing, do_nothing);
     };
     MemoryOperation(gpu_addr, size, true, mapped_big, do_nothing, flush_short_pages);
+    if (run_size != 0) {
+        rasterizer->FlushRegion(run_start, run_size, which);
+    }
 }
 
 bool MemoryManager::IsMemoryDirty(GPUVAddr gpu_addr, size_t size,
