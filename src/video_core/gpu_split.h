@@ -160,6 +160,12 @@ public:
     [[nodiscard]] static bool OnBackThread() {
         return on_back_thread;
     }
+    /// Whether the calling thread records Vulkan work: the back while it runs. Without the split
+    /// the GPU thread does, and this tree has no marker for it: every thread counts then (no
+    /// deferred page caching, RasterizerVulkan::OnCPUWrite, port of zortos293/Lichii#1518).
+    [[nodiscard]] static bool OwnsScheduler() {
+        return Get().BackRunning() ? on_back_thread : true;
+    }
     /// Back: the ring position of the entry being run.
     [[nodiscard]] u64 BackEntryPosition() const {
         return back_entry_position;
