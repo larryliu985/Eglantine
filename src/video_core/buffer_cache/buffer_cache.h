@@ -1587,7 +1587,8 @@ void BufferCache<P>::PopAsyncFlushes() {
 }
 
 template <class P>
-void BufferCache<P>::ClaimCpuWrites(std::span<const std::pair<DAddr, u64>> ranges) {
+template <typename Ranges>
+void BufferCache<P>::ClaimCpuWrites(const Ranges& ranges) {
     for (const auto& [device_addr, size] : ranges) {
         if (IsRegionGpuModified(device_addr, size)) {
             // The CPU's bytes are in guest memory: read downloads leave the range.
